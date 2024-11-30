@@ -70,151 +70,151 @@ __global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigne
 	int mind = globind * MASK_ARRAY_SIZE;
 	int boards_shift = blockDim.x * gridDim.x * BOARD_SIZE;
 	int masks_shift = blockDim.x * gridDim.x * MASK_ARRAY_SIZE;
-	bool workFlag = true;
+	bool workFlag = true, indexChange = false;
 	char board[BOARD_SIZE];
 	uint16_t locmasks[MASK_ARRAY_SIZE];
 	Stack numStack, indStack;
 	initializeStack(&numStack);
 	initializeStack(&indStack);
+	int i = 0;
+	int j = (i + 1) % max_rec_size;
+
+	memcpy(board, boards + bind, sizeof(char) * BOARD_SIZE);
+	memcpy(locmasks, masks + mind, sizeof(uint16_t) * MASK_ARRAY_SIZE);
 
 	while (workFlag)
 	{
-		for (int i = 0; i < max_rec_size && workFlag; i++)
+		if (controlArray[globind + blockDim.x * gridDim.x * i] != 1)
 		{
-			if (controlArray[globind + blockDim.x * gridDim.x * i] == 1)
+			while (controlArray[globind + blockDim.x * gridDim.x * i] != 1)
+				i = (i + 1) % max_rec_size;
+			memcpy(board, boards + boards_shift * i + bind, sizeof(char) * BOARD_SIZE);
+			memcpy(locmasks, masks + masks_shift * i + mind, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+			j = (i + 1) % max_rec_size;
+		}
+
+		int minimalpossibilities = 9;
+		int minimalpossibilities_ind = 82;
+		bool error = false;
+		bool doneFlag = true;
+
+		for (int k = 0; k < BOARD_SIZE; k++)
+		{
+			if (board[k] == '0')
 			{
-				memcpy(board, boards + boards_shift * i + bind, sizeof(char) * BOARD_SIZE);
-				memcpy(locmasks, masks + masks_shift * i + mind, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+				doneFlag = false;
+				uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18];
+				if (mask == 0x01FF)
+				{
+					error = true;
+					break;
+				}
+				else if (minimalpossibilities > cellmask_to_possibilities(mask))
+				{
+					minimalpossibilities = cellmask_to_possibilities(mask);
+					minimalpossibilities_ind = k;
+				}
 			}
+		}
 
-			int j = (i + 1) % max_rec_size;
-
-			while (controlArray[globind + blockDim.x * gridDim.x * i] == 1 && workFlag)
+		if (error)
+		{
+			if (isEmptyStack(&numStack))
 			{
-				int minimalpossibilities = 9;
-				int minimalpossibilities_ind = 82;
-				bool error = false;
-				bool doneFlag = true;
-
-				for (int k = 0; k < BOARD_SIZE; k++)
+				controlArray[globind + blockDim.x * gridDim.x * i] = 0;
+			}
+			else
+			{
+				uint8_t ind, number;
+				pop(&indStack, &ind);
+				pop(&numStack, &number);
+				while (board[ind] != '0')
 				{
-					if (board[k] == '0')
+					number = board[ind] - '0';
+					board[ind] = '0';
+					locmasks[GetRow(ind)] &= ~(1 << (number - 1));
+					locmasks[GetCol(ind) + 9] &= ~(1 << (number - 1));
+					locmasks[GetBox(ind) + 18] &= ~(1 << (number - 1));
+					pop(&indStack, &ind);
+					pop(&numStack, &number);
+				}
+				board[ind] = '0' + number;
+				locmasks[GetRow(ind)] |= (1 << (number - 1));
+				locmasks[GetCol(ind) + 9] |= (1 << (number - 1));
+				locmasks[GetBox(ind) + 18] |= (1 << (number - 1));
+				if (!isEmptyStack(&numStack))
+				{
+					push(&indStack, ind);
+					push(&numStack, number);
+				}
+			}
+		}
+
+		if (doneFlag && !error)
+		{
+			workFlag = false;
+			memcpy(boards + bind, board, sizeof(char) * BOARD_SIZE);
+		}
+
+		if (!doneFlag && !error && workFlag)
+		{
+			int k = 0;
+			uint16_t oldRowMask = locmasks[GetRow(minimalpossibilities_ind)];
+			uint16_t oldColMask = locmasks[GetCol(minimalpossibilities_ind) + 9];
+			uint16_t oldBoxMask = locmasks[GetBox(minimalpossibilities_ind) + 18];
+			uint16_t combineMask = (oldRowMask | oldColMask) | oldBoxMask;
+
+			bool full = false;
+
+			for (int l = 0; l < 9; l++)
+			{
+				if ((combineMask >> l) & 1)
+					continue;
+
+				if (k == minimalpossibilities - 1)
+				{
+					board[minimalpossibilities_ind] = l + '0' + 1;
+					locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
+					locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
+					locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
+					if (!isEmptyStack(&numStack))
 					{
-						doneFlag = false;
-						uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18];
-						if (mask == 0x01FF)
-						{
-							error = true;
-							break;
-						}
-						else if (minimalpossibilities > cellmask_to_possibilities(mask))
-						{
-							minimalpossibilities = cellmask_to_possibilities(mask);
-							minimalpossibilities_ind = k;
-						}
+						push(&numStack, l + 1);
+						push(&indStack, minimalpossibilities_ind);
 					}
+					break;
 				}
 
-				if (error)
+				while (j != i && !full)
 				{
-					if (isEmptyStack(&numStack))
+					if (controlArray[globind + j * blockDim.x * gridDim.x] == 0)
 					{
-						controlArray[globind + blockDim.x * gridDim.x * i] = 0;
+						board[minimalpossibilities_ind] = l + '0' + 1;
+						memcpy(boards + j * boards_shift + bind, board, sizeof(char) * BOARD_SIZE);
+						board[minimalpossibilities_ind] = '0';
+						locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
+						locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
+						locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
+						memcpy(masks + j * masks_shift + mind, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+						locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask;
+						locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask;
+						locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask;
+						controlArray[globind + j * blockDim.x * gridDim.x] = 1;
+						break;
 					}
-					else
-					{
-						uint8_t ind, number;
-						pop(&indStack, &ind);
-						pop(&numStack, &number);
-						while (board[ind] != '0')
-						{
-							number = board[ind] - '0';
-							board[ind] = '0';
-							locmasks[GetRow(ind)] &= ~(1 << (number - 1));
-							locmasks[GetCol(ind) + 9] &= ~(1 << (number - 1));
-							locmasks[GetBox(ind) + 18] &= ~(1 << (number - 1));
-							pop(&indStack, &ind);
-							pop(&numStack, &number);
-						}
-						board[ind] = '0' + number;
-						locmasks[GetRow(ind)] |= (1 << (number - 1));
-						locmasks[GetCol(ind) + 9] |= (1 << (number - 1));
-						locmasks[GetBox(ind) + 18] |= (1 << (number - 1));
-						if (!isEmptyStack(&numStack))
-						{
-							push(&indStack, ind);
-							push(&numStack, number);
-						}
-					}
+					j = (j + 1) % max_rec_size;
 				}
 
-				if (doneFlag && !error)
+				if (j == i && !full)
+					full = true;
+
+				if (full)
 				{
-					workFlag = false;
-					memcpy(boards + bind, board, sizeof(char) * BOARD_SIZE);
+					push(&numStack, l + 1);
+					push(&indStack, minimalpossibilities_ind);
 				}
 
-				if (!doneFlag && !error && workFlag)
-				{
-					int k = 0;
-					uint16_t oldRowMask = locmasks[GetRow(minimalpossibilities_ind)];
-					uint16_t oldColMask = locmasks[GetCol(minimalpossibilities_ind) + 9];
-					uint16_t oldBoxMask = locmasks[GetBox(minimalpossibilities_ind) + 18];
-					uint16_t combineMask = (oldRowMask | oldColMask) | oldBoxMask;
-
-					bool full = false;
-
-					for (int l = 0; l < 9; l++)
-					{
-						if ((combineMask >> l) & 1)
-							continue;
-
-						if (k == minimalpossibilities - 1)
-						{
-							board[minimalpossibilities_ind] = l + '0' + 1;
-							locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
-							locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
-							locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
-							if (!isEmptyStack(&numStack))
-							{
-								push(&numStack, l + 1);
-								push(&indStack, minimalpossibilities_ind);
-							}
-							break;
-						}
-
-						while (j != i && !full)
-						{
-							if (controlArray[globind + j * blockDim.x * gridDim.x] == 0)
-							{
-								board[minimalpossibilities_ind] = l + '0' + 1;
-								memcpy(boards + j * boards_shift + bind, board, sizeof(char) * BOARD_SIZE);
-								board[minimalpossibilities_ind] = '0';
-								locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
-								locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
-								locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
-								memcpy(masks + j * masks_shift + mind, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
-								locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask;
-								locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask;
-								locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask;
-								controlArray[globind + j * blockDim.x * gridDim.x] = 1;
-								break;
-							}
-							j = (j + 1) % max_rec_size;
-						}
-
-						if (j == i && !full)
-							full = true;
-
-						if (full)
-						{
-							push(&numStack, l + 1);
-							push(&indStack, minimalpossibilities_ind);
-						}
-
-						k++;
-					}
-				}
+				k++;
 			}
 		}
 	}
