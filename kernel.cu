@@ -25,30 +25,30 @@ using namespace std::chrono;
 
 #define BOARD_SIZE 81 // BOARD_DIM * BOARD_DIM
 
-#define MAX_BOARDS 819200
+#define MAX_BOARDS 614400
 
 #define MASK_ARRAY_SIZE 27
 
-#define RECURSION_TREE_SIZE 300
+#define RECURSION_TREE_SIZE 256
 
-#define MAX_BLOCKS 80
+#define MAX_BLOCKS 60
 
 #define THREADS_IN_BLOCK 256
 
 #define STACK_SIZE 40
 
-__host__ __device__ int cellmask_to_possibilities(uint16_t cellmask);
+__host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask);
 __host__ void print_board(char* board);
 __host__ bool setMasks(uint16_t* masks, char* board, int i);
-__host__ __device__ int GetRow(int ind);
-__host__ __device__ int GetCol(int ind);
-__host__ __device__ int GetBox(int ind);
+__host__ __device__ uint8_t GetRow(uint8_t ind);
+__host__ __device__ uint8_t GetCol(uint8_t ind);
+__host__ __device__ uint8_t GetBox(uint8_t ind);
 
 // Stack functions and structure
 typedef struct Stack
 {
 	uint8_t data[STACK_SIZE];
-	int top;
+	int8_t top;
 } Stack;
 
 __device__ void initializeStack(Stack* stack);
@@ -58,55 +58,51 @@ __device__ bool top(Stack* stack, uint8_t* value);
 __device__ bool isEmptyStack(Stack* stack);
 __device__ bool isFullStack(Stack* stack);
 
-__global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigned int size, unsigned int max_rec_size);
+__global__ void solve(char* boards, uint16_t* masks, const unsigned int size, const unsigned int max_rec_size);
 __global__ void solveglob(char* boards, uint16_t* masks, char* controlArray, unsigned int size, unsigned int max_rec_size);
 
 cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time);
 
-__global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigned int size, unsigned int max_rec_size)
+__global__ void solve(char* boards, uint16_t* masks, const unsigned int size, const unsigned int max_rec_size)
 {
-	int globind = blockDim.x * blockIdx.x + threadIdx.x;
-	int bind = globind * BOARD_SIZE;
-	int mind = globind * MASK_ARRAY_SIZE;
-	int boards_shift = blockDim.x * gridDim.x * BOARD_SIZE;
-	int masks_shift = blockDim.x * gridDim.x * MASK_ARRAY_SIZE;
-	bool workFlag = true, indexChange = false;
 	char board[BOARD_SIZE];
 	uint16_t locmasks[MASK_ARRAY_SIZE];
 	Stack numStack, indStack;
+	char controlArray[RECURSION_TREE_SIZE];
+	controlArray[0] = 1;
 	initializeStack(&numStack);
 	initializeStack(&indStack);
-	int i = 0;
-	int j = (i + 1) % max_rec_size;
+	uint8_t i = 0;
+	uint8_t j = (i + 1) % max_rec_size;
+	uint8_t status = 0; // To jest zamiast booli 1 - done rozpatrywanej tablicy, 2 - error rozpatrywanej tablicy
 
-	memcpy(board, boards + bind, sizeof(char) * BOARD_SIZE);
-	memcpy(locmasks, masks + mind, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+	memcpy(board, boards + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
+	memcpy(locmasks, masks + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, sizeof(uint16_t) * MASK_ARRAY_SIZE);
 
-	while (workFlag)
+	while (status != 1)
 	{
-		if (controlArray[globind + blockDim.x * gridDim.x * i] != 1)
+		if (controlArray[i] != 1)
 		{
-			while (controlArray[globind + blockDim.x * gridDim.x * i] != 1)
+			while (controlArray[i] != 1)
 				i = (i + 1) % max_rec_size;
-			memcpy(board, boards + boards_shift * i + bind, sizeof(char) * BOARD_SIZE);
-			memcpy(locmasks, masks + masks_shift * i + mind, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+			memcpy(board, boards + blockDim.x * gridDim.x * BOARD_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
+			memcpy(locmasks, masks + blockDim.x * gridDim.x * MASK_ARRAY_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, sizeof(uint16_t) * MASK_ARRAY_SIZE);
 			j = (i + 1) % max_rec_size;
 		}
 
-		int minimalpossibilities = 9;
-		int minimalpossibilities_ind = 82;
-		bool error = false;
-		bool doneFlag = true;
+		uint8_t minimalpossibilities = 9;
+		uint8_t minimalpossibilities_ind = 82;
+		status = 1;
 
-		for (int k = 0; k < BOARD_SIZE; k++)
+		for (uint8_t k = 0; k < BOARD_SIZE; k++)
 		{
 			if (board[k] == '0')
 			{
-				doneFlag = false;
+				status = 0;
 				uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18];
 				if (mask == 0x01FF)
 				{
-					error = true;
+					status = 2;
 					break;
 				}
 				else if (minimalpossibilities > cellmask_to_possibilities(mask))
@@ -117,11 +113,12 @@ __global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigne
 			}
 		}
 
-		if (error)
+		// Ta plansza nie ma rozwiązania
+		if (status == 2)
 		{
 			if (isEmptyStack(&numStack))
 			{
-				controlArray[globind + blockDim.x * gridDim.x * i] = 0;
+				controlArray[i] = 0;
 			}
 			else
 			{
@@ -150,23 +147,18 @@ __global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigne
 			}
 		}
 
-		if (doneFlag && !error)
+		// Udało się rozwiązać sudoku
+		if (status == 1)
 		{
-			workFlag = false;
-			memcpy(boards + bind, board, sizeof(char) * BOARD_SIZE);
+			memcpy(boards + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
 		}
 
-		if (!doneFlag && !error && workFlag)
+		if (status == 0)
 		{
-			int k = 0;
-			uint16_t oldRowMask = locmasks[GetRow(minimalpossibilities_ind)];
-			uint16_t oldColMask = locmasks[GetCol(minimalpossibilities_ind) + 9];
-			uint16_t oldBoxMask = locmasks[GetBox(minimalpossibilities_ind) + 18];
-			uint16_t combineMask = (oldRowMask | oldColMask) | oldBoxMask;
+			uint8_t k = 0;
+			uint16_t combineMask = (locmasks[GetRow(minimalpossibilities_ind)] | locmasks[GetCol(minimalpossibilities_ind) + 9]) | locmasks[GetBox(minimalpossibilities_ind) + 18];
 
-			bool full = false;
-
-			for (int l = 0; l < 9; l++)
+			for (uint8_t l = 0; l < 9; l++)
 			{
 				if ((combineMask >> l) & 1)
 					continue;
@@ -174,9 +166,9 @@ __global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigne
 				if (k == minimalpossibilities - 1)
 				{
 					board[minimalpossibilities_ind] = l + '0' + 1;
-					locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
-					locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
-					locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
+					locmasks[GetRow(minimalpossibilities_ind)] |= (1 << l);
+					locmasks[GetCol(minimalpossibilities_ind) + 9] |= (1 << l);
+					locmasks[GetBox(minimalpossibilities_ind) + 18] |= (1 << l);
 					if (!isEmptyStack(&numStack))
 					{
 						push(&numStack, l + 1);
@@ -185,30 +177,30 @@ __global__ void solve(char* boards, uint16_t* masks, char* controlArray, unsigne
 					break;
 				}
 
-				while (j != i && !full)
+				while (j != i && status != 5)
 				{
-					if (controlArray[globind + j * blockDim.x * gridDim.x] == 0)
+					if (controlArray[j] == 0)
 					{
 						board[minimalpossibilities_ind] = l + '0' + 1;
-						memcpy(boards + j * boards_shift + bind, board, sizeof(char) * BOARD_SIZE);
+						memcpy(boards + j * blockDim.x * gridDim.x * BOARD_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
 						board[minimalpossibilities_ind] = '0';
-						locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
-						locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
-						locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
-						memcpy(masks + j * masks_shift + mind, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
-						locmasks[GetRow(minimalpossibilities_ind)] = oldRowMask;
-						locmasks[GetCol(minimalpossibilities_ind) + 9] = oldColMask;
-						locmasks[GetBox(minimalpossibilities_ind) + 18] = oldBoxMask;
-						controlArray[globind + j * blockDim.x * gridDim.x] = 1;
+						locmasks[GetRow(minimalpossibilities_ind)] |= (1 << l);
+						locmasks[GetCol(minimalpossibilities_ind) + 9] |= (1 << l);
+						locmasks[GetBox(minimalpossibilities_ind) + 18] |= (1 << l);
+						memcpy(masks + j * blockDim.x * gridDim.x * MASK_ARRAY_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+						locmasks[GetRow(minimalpossibilities_ind)] &= ~(1 << l);
+						locmasks[GetCol(minimalpossibilities_ind) + 9] &= ~(1 << l);
+						locmasks[GetBox(minimalpossibilities_ind) + 18] &= ~(1 << l);
+						controlArray[j] = 1;
 						break;
 					}
 					j = (j + 1) % max_rec_size;
 				}
 
-				if (j == i && !full)
-					full = true;
+				if (j == i && status != 5)
+					status = 5;
 
-				if (full)
+				if (status == 5)
 				{
 					push(&numStack, l + 1);
 					push(&indStack, minimalpossibilities_ind);
@@ -490,8 +482,6 @@ cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards,
 
 	char* d_boards;
 
-	char* d_controlerArray;
-
 	uint16_t* d_masks;
 
 	int blocks = 0;
@@ -512,13 +502,6 @@ cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards,
 	if (cudaStatus != cudaSuccess)
 	{
 		fprintf(stderr, "cudaMalloc d_boards failes!\n");
-		goto Error;
-	}
-
-	cudaStatus = cudaMalloc(&d_controlerArray, sizeof(char) * blocks * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
-	if (cudaStatus != cudaSuccess)
-	{
-		fprintf(stderr, "cudaMalloc d_controllerArray failes!\n");
 		goto Error;
 	}
 
@@ -543,25 +526,23 @@ cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards,
 		goto Error;
 	}
 
-	cudaStatus = cudaMemset(d_controlerArray, 0, sizeof(char) * blocks * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
-	if (cudaStatus != cudaSuccess)
-	{
-		fprintf(stderr, "cudaMemset 0 failes!\n");
-		goto Error;
-	}
-
-	cudaStatus = cudaMemset(d_controlerArray, 1, sizeof(char) * blocks * THREADS_IN_BLOCK);
-	if (cudaStatus != cudaSuccess)
-	{
-		fprintf(stderr, "cudaMemset 1 failes!\n");
-		goto Error;
-	}
-
 	auto gpu_memory_alloc_te = high_resolution_clock::now();
 	*copy_to_d_time += 0.001 * duration_cast<microseconds>(gpu_memory_alloc_te - gpu_memory_alloc_ts).count();
+	
+	int numBlocks;
+	int blockSize;   // The launch configurator returned block size 
+	int minGridSize; // The minimum grid size needed to achieve the 
+	//// maximum occupancy for a full device launch 
+	//int gridSize;    // The actual grid size needed, based on input size 
+	//
+	//cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, solve, 96, 0);
+	//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, solve, 0, 0);
+	// Round up according to array size 
+	//gridSize = (arrayCount + blockSize - 1) / blockSize;
+
 
 	auto gpu_sol_ts = high_resolution_clock::now();
-	solve <<<blocks, THREADS_IN_BLOCK >>> (d_boards, d_masks, d_controlerArray, boards, RECURSION_TREE_SIZE);
+	solve <<<blocks, THREADS_IN_BLOCK >>> (d_boards, d_masks, boards, RECURSION_TREE_SIZE);
 	cudaStatus = cudaDeviceSynchronize();
 	auto gpu_sol_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
@@ -583,17 +564,16 @@ cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards,
 
 Error:
 	cudaFree(d_boards);
-	cudaFree(d_controlerArray);
 	cudaFree(d_masks);
 
 	return cudaStatus;
 }
 
-__host__ __device__ int cellmask_to_possibilities(uint16_t cellmask)
+__host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask)
 {
-	int result = 0;
+	uint8_t result = 0;
 
-	for (int i = 0; i < 9; i++)
+	for (uint8_t i = 0; i < 9; i++)
 	{
 		result += ~(cellmask) & 1;
 		cellmask >>= 1;
@@ -653,22 +633,22 @@ __host__ bool setMasks(uint16_t* masks, char* board, int i)
 		return false;
 }
 
-__host__ __device__ int GetRow(int ind)
+__host__ __device__ uint8_t GetRow(uint8_t ind)
 {
 	return (ind - GetCol(ind)) / BOARD_DIM;
 }
 
-__host__ __device__ int GetCol(int ind)
+__host__ __device__ uint8_t GetCol(uint8_t ind)
 {
 	return ind % BOARD_DIM;
 }
 
-__host__ __device__ int GetBox(int ind)
+__host__ __device__ uint8_t GetBox(uint8_t ind)
 {
-	int row = GetRow(ind);
-	int col = GetCol(ind);
-	int boxrow = row - (row % BOX_DIM);
-	int boxcol = (col - (col % BOX_DIM)) / BOX_DIM;
+	uint8_t row = GetRow(ind);
+	uint8_t col = GetCol(ind);
+	uint8_t boxrow = row - (row % BOX_DIM);
+	uint8_t boxcol = (col - (col % BOX_DIM)) / BOX_DIM;
 	return boxrow + boxcol;
 }
 
