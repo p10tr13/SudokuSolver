@@ -19,23 +19,23 @@
 using namespace std;
 using namespace std::chrono;
 
-#define BOX_DIM 3
+#define BOX_DIM 3 // Wymiar kwadracików w środku sudoku
 
-#define BOARD_DIM 9 // BOX_DIM * BOX_DIM
+#define BOARD_DIM 9 // BOX_DIM * BOX_DIM wymiar planszy
 
-#define BOARD_SIZE 81 // BOARD_DIM * BOARD_DIM
+#define BOARD_SIZE 81 // BOARD_DIM * BOARD_DIM cała wielkość planszy
 
-#define MAX_BOARDS 614400
+#define MAX_BOARDS 460800 // ilość plansz sudoku jakie przetworzy program (najlepiej wielokrotność THREADS_IN_BLOCK * MAX_BLOCKS)
 
-#define MASK_ARRAY_SIZE 27
+#define MASK_ARRAY_SIZE 27 // wielkość tablicy masek potrzebnych na opisanie jednej planszy
 
-#define RECURSION_TREE_SIZE 256
+#define RECURSION_TREE_SIZE 256 // ilość plansz jakie każdy wątek ma dla siebie do dyspozycji (najlepiej wielokrotność 8)
 
-#define MAX_BLOCKS 60
+#define MAX_BLOCKS 240 // ilość bloków, które będą zakolejkowane przez karte
 
-#define THREADS_IN_BLOCK 256
+#define THREADS_IN_BLOCK 256 // ilość wątków w bloku (wielokrotność 32)
 
-#define STACK_SIZE 40
+#define STACK_SIZE 40 // wielkość stacku dla wątku, który nie ma już wolnych tablic do dyspozycji
 
 __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask);
 __host__ void print_board(char* board);
@@ -44,7 +44,7 @@ __host__ __device__ uint8_t GetRow(uint8_t ind);
 __host__ __device__ uint8_t GetCol(uint8_t ind);
 __host__ __device__ uint8_t GetBox(uint8_t ind);
 
-// Stack functions and structure
+// Struktura dla stosu
 typedef struct Stack
 {
 	uint8_t data[STACK_SIZE];
@@ -58,22 +58,28 @@ __device__ bool top(Stack* stack, uint8_t* value);
 __device__ bool isEmptyStack(Stack* stack);
 __device__ bool isFullStack(Stack* stack);
 
-__global__ void solve(char* boards, uint16_t* masks, const unsigned int size, const unsigned int max_rec_size);
-__global__ void solveglob(char* boards, uint16_t* masks, char* controlArray, unsigned int size, unsigned int max_rec_size);
+__global__ void solve(char* boards, uint16_t* masks, const unsigned int size);
 
 cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time);
 
-__global__ void solve(char* boards, uint16_t* masks, const unsigned int size, const unsigned int max_rec_size)
+/**
+ * Funckja wykonująca algorytm rozwiązywania sudoku.
+ *
+ * @param boards - wskaźnik do tablicy, w której zapisane są plansze sudoku plus miejsca wolne na nowe plansze
+ * @param masks - wskaźnik do tablicy, w której zapisane są maski dla plansz sudoku plus miejsca wolne na nowe maski dla nowych plansz
+ * @param size - ilość tablic do rozwiązania
+ */
+__global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 {
-	char board[BOARD_SIZE];
-	uint16_t locmasks[MASK_ARRAY_SIZE];
-	Stack numStack, indStack;
-	char controlArray[RECURSION_TREE_SIZE];
+	char board[BOARD_SIZE]; // Lokalna tablica sudoku
+	uint16_t locmasks[MASK_ARRAY_SIZE]; // Lokalna tablica masek (maski[9 masek dla rzędów, 9 masek dla kolumn, 9 masek dla kwadratów])
+	Stack numStack, indStack; // Stosy dla liczb, które trzeba wpisać lub są wpisane w pola oraz stos indeksów, gdzie dana liczba jest lub powinna być wpisana 
+	char controlArray[RECURSION_TREE_SIZE]; // Tablica odpowiadająca za trzymanie informacji, która plansza sudoku w pamięci jest zapisana
 	controlArray[0] = 1;
 	initializeStack(&numStack);
 	initializeStack(&indStack);
-	uint8_t i = 0;
-	uint8_t j = (i + 1) % max_rec_size;
+	uint8_t i = 0; // Indeks tablicy, którą aktualnie rozwiązujemy
+	uint8_t j = (i + 1) % RECURSION_TREE_SIZE; // Indeks, od którego będziemy szukać pustej tablicy
 	uint8_t status = 0; // To jest zamiast booli 1 - done rozpatrywanej tablicy, 2 - error rozpatrywanej tablicy
 
 	memcpy(board, boards + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
@@ -81,30 +87,35 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size, co
 
 	while (status != 1)
 	{
+		// Jeżeli liczba kontrolna dla tej tablicy ma 0 to oznacza, że nie ma co rozwiązywać i musimy szukać następnej tablicy
 		if (controlArray[i] != 1)
 		{
 			while (controlArray[i] != 1)
-				i = (i + 1) % max_rec_size;
+				i = (i + 1) % RECURSION_TREE_SIZE;
 			memcpy(board, boards + blockDim.x * gridDim.x * BOARD_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
 			memcpy(locmasks, masks + blockDim.x * gridDim.x * MASK_ARRAY_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, sizeof(uint16_t) * MASK_ARRAY_SIZE);
-			j = (i + 1) % max_rec_size;
+			j = (i + 1) % RECURSION_TREE_SIZE;
 		}
 
 		uint8_t minimalpossibilities = 9;
 		uint8_t minimalpossibilities_ind = 82;
-		status = 1;
+		status = 1; // Status ten oznacza, że plansza skończona. W pętli, gdy napotkamy 0 zmieniamy ten status na 0, jako nie skończona.
 
+		// Iteracja po wszystkich komórkach sudoku
 		for (uint8_t k = 0; k < BOARD_SIZE; k++)
 		{
 			if (board[k] == '0')
 			{
-				status = 0;
-				uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18];
+				status = 0; // Ustawiamy status, że jeszcze nie jest skończona ta plansza
+				uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18]; // Suma masek dla tej komórki
+
+				// Jeżeli pierwsze 9 bitów zapełnionych, a dalej jest 0 w tej komórce, więc mamy błąd na planszy
 				if (mask == 0x01FF)
 				{
 					status = 2;
 					break;
 				}
+				// Jeżeli znaleźliśmy komórkę z mniejszą ilością wolnych liczb do nie do wpisania to ją zapamiętujemy
 				else if (minimalpossibilities > cellmask_to_possibilities(mask))
 				{
 					minimalpossibilities = cellmask_to_possibilities(mask);
@@ -116,7 +127,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size, co
 		// Ta plansza nie ma rozwiązania
 		if (status == 2)
 		{
-			if (isEmptyStack(&numStack))
+			if (isEmptyStack(&indStack))
 			{
 				controlArray[i] = 0;
 			}
@@ -139,7 +150,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size, co
 				locmasks[GetRow(ind)] |= (1 << (number - 1));
 				locmasks[GetCol(ind) + 9] |= (1 << (number - 1));
 				locmasks[GetBox(ind) + 18] |= (1 << (number - 1));
-				if (!isEmptyStack(&numStack))
+				if (!isEmptyStack(&indStack))
 				{
 					push(&indStack, ind);
 					push(&numStack, number);
@@ -153,23 +164,30 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size, co
 			memcpy(boards + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
 		}
 
+		// Nie rozwiązaliśmy do końca sudoku, ale nie napotkaliśmy też jeszcze błędu
 		if (status == 0)
 		{
 			uint8_t k = 0;
+			// Maska dla danej komórki (suma masek z rzędu, kolumny i kwadracika)
 			uint16_t combineMask = (locmasks[GetRow(minimalpossibilities_ind)] | locmasks[GetCol(minimalpossibilities_ind) + 9]) | locmasks[GetBox(minimalpossibilities_ind) + 18];
 
+			// Iterujemy się po wszystkich 9 możliwych cyfrach w sudoku
 			for (uint8_t l = 0; l < 9; l++)
 			{
-				if ((combineMask >> l) & 1)
+				if ((combineMask >> l) & 1) // Jeżeli jest 1 na pozycji l to znaczy, że już jest zajęta ta liczba i można iść dalej
 					continue;
 
-				if (k == minimalpossibilities - 1)
+				if (k == minimalpossibilities - 1) // Jest to ostatnia możliwość, dlatego tą sobie do aktualnie rozważanej tablicy wpisujemy
 				{
+					// Wpisanie do tablicy cyfry
 					board[minimalpossibilities_ind] = l + '0' + 1;
+
+					// Aktualizacja masek
 					locmasks[GetRow(minimalpossibilities_ind)] |= (1 << l);
 					locmasks[GetCol(minimalpossibilities_ind) + 9] |= (1 << l);
 					locmasks[GetBox(minimalpossibilities_ind) + 18] |= (1 << l);
-					if (!isEmptyStack(&numStack))
+
+					if (!isEmptyStack(&numStack)) // Jeżeli jest taka potrzeba to wrzucamy na stos, aby móc się potem wrócić
 					{
 						push(&numStack, l + 1);
 						push(&indStack, minimalpossibilities_ind);
@@ -179,28 +197,30 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size, co
 
 				while (j != i && status != 5)
 				{
-					if (controlArray[j] == 0)
-					{
-						board[minimalpossibilities_ind] = l + '0' + 1;
-						memcpy(boards + j * blockDim.x * gridDim.x * BOARD_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
-						board[minimalpossibilities_ind] = '0';
-						locmasks[GetRow(minimalpossibilities_ind)] |= (1 << l);
-						locmasks[GetCol(minimalpossibilities_ind) + 9] |= (1 << l);
-						locmasks[GetBox(minimalpossibilities_ind) + 18] |= (1 << l);
-						memcpy(masks + j * blockDim.x * gridDim.x * MASK_ARRAY_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
-						locmasks[GetRow(minimalpossibilities_ind)] &= ~(1 << l);
-						locmasks[GetCol(minimalpossibilities_ind) + 9] &= ~(1 << l);
-						locmasks[GetBox(minimalpossibilities_ind) + 18] &= ~(1 << l);
-						controlArray[j] = 1;
+					if (controlArray[j] == 0) // Znaleziono pustą tablicę
 						break;
-					}
-					j = (j + 1) % max_rec_size;
+					j = (j + 1) % RECURSION_TREE_SIZE;
 				}
 
-				if (j == i && status != 5)
+				if (j != i && status != 5) // Znaleziono pustą tablice w pamięci
+				{
+					board[minimalpossibilities_ind] = l + '0' + 1;
+					memcpy(boards + j * blockDim.x * gridDim.x * BOARD_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
+					board[minimalpossibilities_ind] = '0';
+					locmasks[GetRow(minimalpossibilities_ind)] |= (1 << l);
+					locmasks[GetCol(minimalpossibilities_ind) + 9] |= (1 << l);
+					locmasks[GetBox(minimalpossibilities_ind) + 18] |= (1 << l);
+					memcpy(masks + j * blockDim.x * gridDim.x * MASK_ARRAY_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
+					locmasks[GetRow(minimalpossibilities_ind)] &= ~(1 << l);
+					locmasks[GetCol(minimalpossibilities_ind) + 9] &= ~(1 << l);
+					locmasks[GetBox(minimalpossibilities_ind) + 18] &= ~(1 << l);
+					controlArray[j] = 1;
+				}
+
+				if (j == i && status != 5) // Nieznaleziono pustych tablica w pamięci
 					status = 5;
 
-				if (status == 5)
+				if (status == 5) // Nie ma pustych tablic więc musimy wrzucić na stos
 				{
 					push(&numStack, l + 1);
 					push(&indStack, minimalpossibilities_ind);
@@ -212,151 +232,11 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size, co
 	}
 }
 
-__global__ void solveglob(char* boards, uint16_t* masks, char* controlArray, unsigned int size, unsigned int max_rec_size)
-{
-	int globind = blockDim.x * blockIdx.x + threadIdx.x;
-	int bind = globind * BOARD_SIZE;
-	int mind = globind * MASK_ARRAY_SIZE;
-	int boards_shift = blockDim.x * gridDim.x * BOARD_SIZE;
-	int masks_shift = blockDim.x * gridDim.x * MASK_ARRAY_SIZE;
-	bool workFlag = true;
-	Stack numStack, indStack;
-	initializeStack(&numStack);
-	initializeStack(&indStack);
-
-	while (workFlag)
-	{
-		for (int i = 0; i < max_rec_size && workFlag; i++)
-		{
-			int j = (i + 1) % max_rec_size;
-
-			while (controlArray[globind + blockDim.x * gridDim.x * i] == 1 && workFlag)
-			{
-				int minimalpossibilities = 9;
-				int minimalpossibilities_ind = 82;
-				bool error = false;
-				bool doneFlag = true;
-
-				for (int k = 0; k < BOARD_SIZE; k++)
-				{
-					if (boards[bind + boards_shift * i + k] == '0')
-					{
-						doneFlag = false;
-						uint16_t mask = (masks[masks_shift * i + mind + GetRow(k)] | masks[masks_shift * i + mind + GetCol(k) + 9]) | masks[masks_shift * i + mind + GetBox(k) + 18];
-						if (mask == 0x01FF)
-						{
-							error = true;
-							break;
-						}
-						else if (minimalpossibilities > cellmask_to_possibilities(mask))
-						{
-							minimalpossibilities = cellmask_to_possibilities(mask);
-							minimalpossibilities_ind = k;
-						}
-					}
-				}
-
-				if (error)
-				{
-					if (isEmptyStack(&numStack))
-					{
-						controlArray[globind + blockDim.x * gridDim.x * i] = 0;
-					}
-					else
-					{
-						uint8_t ind, number;
-						pop(&indStack, &ind);
-						pop(&numStack, &number);
-						while (boards[bind + boards_shift * i + ind] != '0')
-						{
-							number = boards[bind + boards_shift * i + ind] - '0';
-							boards[bind + boards_shift * i + ind] = '0';
-							masks[mind + masks_shift * i + GetRow(ind)] &= ~(1 << (number - 1));
-							masks[mind + masks_shift * i + GetCol(ind) + 9] &= ~(1 << (number - 1));
-							masks[mind + masks_shift * i + GetBox(ind) + 18] &= ~(1 << (number - 1));
-							pop(&indStack, &ind);
-							pop(&numStack, &number);
-						}
-						boards[bind + boards_shift * i + ind] = '0' + number;
-						masks[mind + masks_shift * i + GetRow(ind)] |= (1 << (number - 1));
-						masks[mind + masks_shift * i + GetCol(ind) + 9] |= (1 << (number - 1));
-						masks[mind + masks_shift * i + GetBox(ind) + 18] |= (1 << (number - 1));
-						if (!isEmptyStack(&numStack))
-						{
-							push(&indStack, ind);
-							push(&numStack, number);
-						}
-					}
-				}
-
-				if (doneFlag && !error)
-				{
-					workFlag = false;
-					memcpy(boards + bind, boards + bind + boards_shift * i, sizeof(char) * BOARD_SIZE);
-				}
-
-				if (!doneFlag && !error && workFlag)
-				{
-					int k = 0;
-					uint16_t oldRowMask = masks[mind + masks_shift * i + GetRow(minimalpossibilities_ind)];
-					uint16_t oldColMask = masks[mind + masks_shift * i + GetCol(minimalpossibilities_ind) + 9];
-					uint16_t oldBoxMask = masks[mind + masks_shift * i + GetBox(minimalpossibilities_ind) + 18];
-					uint16_t combineMask = (oldRowMask | oldColMask) | oldBoxMask;
-
-					bool full = false;
-
-					for (int l = 0; l < 9; l++)
-					{
-						if ((combineMask >> l) & 1)
-							continue;
-
-						if (k == minimalpossibilities - 1)
-						{
-							boards[bind + boards_shift * i + minimalpossibilities_ind] = l + '0' + 1;
-							masks[mind + masks_shift * i + GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
-							masks[mind + masks_shift * i + GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
-							masks[mind + masks_shift * i + GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
-							if (!isEmptyStack(&numStack))
-							{
-								push(&numStack, l + 1);
-								push(&indStack, minimalpossibilities_ind);
-							}
-							break;
-						}
-
-						while (j != i && !full)
-						{
-							if (controlArray[globind + j * blockDim.x * gridDim.x] == 0)
-							{
-								memcpy(boards + j * boards_shift + bind, boards + bind + boards_shift * i, sizeof(char) * BOARD_SIZE);
-								memcpy(masks + j * masks_shift + mind, masks + mind + masks_shift * i, sizeof(uint16_t) * MASK_ARRAY_SIZE);
-								boards[j * boards_shift + bind + minimalpossibilities_ind] = l + '0' + 1;
-								masks[j * masks_shift + mind + GetRow(minimalpossibilities_ind)] = oldRowMask | (1 << l);
-								masks[j * masks_shift + mind + GetCol(minimalpossibilities_ind) + 9] = oldColMask | (1 << l);
-								masks[j * masks_shift + mind + GetBox(minimalpossibilities_ind) + 18] = oldBoxMask | (1 << l);
-								controlArray[globind + j * blockDim.x * gridDim.x] = 1;
-								break;
-							}
-							j = (j + 1) % max_rec_size;
-						}
-
-						if (j == i && !full)
-							full = true;
-
-						if (full)
-						{
-							push(&numStack, l + 1);
-							push(&indStack, minimalpossibilities_ind);
-						}
-
-						k++;
-					}
-				}
-			}
-		}
-	}
-}
-
+/**
+ * Funkcja rozgrzewająca GPU (nie robi nic ciekawego).
+ *
+ * @param i - parametr ten nie ma znaczenia.
+ */
 __global__ void rozgrzewka(int i)
 {
 	int res = threadIdx.x * i;
@@ -394,7 +274,7 @@ int main()
 	char line[83];
 	cudaError_t cudaStatus;
 
-	// Część rozgrzewająca GPU (ta funkcja nic nie robi)
+	// Część rozgrzewająca GPU
 	rozgrzewka <<<1, 512 >>> (2);
 	cudaStatus = cudaDeviceSynchronize();
 	if (cudaStatus != cudaSuccess)
@@ -476,6 +356,17 @@ int main()
 	return 0;
 }
 
+/**
+ * Funckja pomocnicza, agregująca wszystkie wywołania CUDA (alokacja pamięci na GPU, zapis danych do GPU, algorytm, odczyt wyników z GPU, zwolnienie pamięci)
+ *
+ * @param[in] h_boards - tablica, w której zapisane są plansze sudoku po stronie hosta
+ * @param[in] h_masks - tablica, w której zapisane są maski dla plansz sudoku po stronie hosta
+ * @param[in] boards - ilość tablic do rozwiązania
+ * @param[out] copy_to_d_time - wskaźnik na zmienną z czasem, w jakim kopiujemy dane z hosta do GPU
+ * @param[out] alg_time - wskaźnik na zmienną z czasem, w jakim wykonujemy funckję rozwiązywania sudoku (algorytm)
+ * @param[out] copy_to_h_time - wskaźnik na zmienną z czasem, w jakim kopiujemy dane z GPU do hosta
+ * @return możliwy error, który zaszedł podczas "CUDA-owych" operacji
+ */
 cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time)
 {
 	cudaError_t cudaStatus;
@@ -528,21 +419,9 @@ cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards,
 
 	auto gpu_memory_alloc_te = high_resolution_clock::now();
 	*copy_to_d_time += 0.001 * duration_cast<microseconds>(gpu_memory_alloc_te - gpu_memory_alloc_ts).count();
-	
-	int numBlocks;
-	int blockSize;   // The launch configurator returned block size 
-	int minGridSize; // The minimum grid size needed to achieve the 
-	//// maximum occupancy for a full device launch 
-	//int gridSize;    // The actual grid size needed, based on input size 
-	//
-	//cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, solve, 96, 0);
-	//cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, solve, 0, 0);
-	// Round up according to array size 
-	//gridSize = (arrayCount + blockSize - 1) / blockSize;
-
 
 	auto gpu_sol_ts = high_resolution_clock::now();
-	solve <<<blocks, THREADS_IN_BLOCK >>> (d_boards, d_masks, boards, RECURSION_TREE_SIZE);
+	solve <<<blocks, THREADS_IN_BLOCK >>> (d_boards, d_masks, boards);
 	cudaStatus = cudaDeviceSynchronize();
 	auto gpu_sol_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
@@ -569,6 +448,12 @@ Error:
 	return cudaStatus;
 }
 
+/**
+ * Zlicza cyfry jakie można wpisać w tą komórkę.
+ *
+ * @param cellmask Suma masek na danej komórce.
+ * @return Liczba cyfr jakie mogą być wpisane w komórkę z tą maską.
+ */
 __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask)
 {
 	uint8_t result = 0;
@@ -582,6 +467,11 @@ __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask)
 	return result;
 }
 
+/**
+ * Wypisuje planszę w konsoli.
+ *
+ * @param board Plansza do wypisania.
+ */
 __host__ void print_board(char* board)
 {
 	for (int i = 0; i < 9; ++i)
@@ -633,16 +523,34 @@ __host__ bool setMasks(uint16_t* masks, char* board, int i)
 		return false;
 }
 
+/**
+ * Liczy, w którym rzędzie znajduje się komórka o danym indeksie.
+ *
+ * @param ind - indeks komórki
+ * @return numer rzędu, w którym jest komórka (liczony od 0)
+ */
 __host__ __device__ uint8_t GetRow(uint8_t ind)
 {
 	return (ind - GetCol(ind)) / BOARD_DIM;
 }
 
+/**
+ * Liczy, w której kolumnie znajduje się komórka o danym indeksie.
+ *
+ * @param ind - indeks komórki
+ * @return numer kolumny, w której jest komórka (liczona od 0)
+ */
 __host__ __device__ uint8_t GetCol(uint8_t ind)
 {
 	return ind % BOARD_DIM;
 }
 
+/**
+ * Liczy, w którym box-ie znajduje się komórka o danym indeksie.
+ *
+ * @param ind - indeks komórki
+ * @return numer box-u, w którym jest komórka (liczony od 0 do 8, od lewego górnego rogu w prawo)
+ */
 __host__ __device__ uint8_t GetBox(uint8_t ind)
 {
 	uint8_t row = GetRow(ind);
@@ -652,11 +560,23 @@ __host__ __device__ uint8_t GetBox(uint8_t ind)
 	return boxrow + boxcol;
 }
 
+/**
+ * Inicjalizuje stos.
+ *
+ * @param stack - wskaźnik na stos do zainicjalizowania
+ */
 __device__ void initializeStack(Stack* stack)
 {
 	stack->top = -1;
 }
 
+/**
+ * Wkłada na górę stosu przekazany element.
+ *
+ * @param stack - wskaźnik na stos
+ * @param value - wartość, którą wrzucamy na stos
+ * @return informacja o powodzeniu akcji, zwraca nie, gdy stos pełny
+ */
 __device__ bool push(Stack* stack, uint8_t value)
 {
 	if (isFullStack(stack))
@@ -668,6 +588,13 @@ __device__ bool push(Stack* stack, uint8_t value)
 	return true;
 }
 
+/**
+ * Zdejmuje z góry stosu element.
+ *
+ * @param[in] stack - wskaźnik na stos
+ * @param[out] value -  wskaźnik na wartość, którą zdejmujemy ze stosu
+ * @return informacja o powodzeniu akcji, zwraca nie, gdy stos pusty
+ */
 __device__ bool pop(Stack* stack, uint8_t* value)
 {
 	if (isEmptyStack(stack))
@@ -679,6 +606,13 @@ __device__ bool pop(Stack* stack, uint8_t* value)
 	return true;
 }
 
+/**
+ * Podgląda z góry stosu element.
+ *
+ * @param[in] stack - wskaźnik na stos
+ * @param[out] value -  wskaźnik na wartość, którą podglądamy na stosie
+ * @return informacja o powodzeniu akcji, zwraca nie, gdy stos pusty
+ */
 __device__ bool top(Stack* stack, uint8_t* value)
 {
 	if (isEmptyStack(stack))
@@ -690,11 +624,23 @@ __device__ bool top(Stack* stack, uint8_t* value)
 	return true;
 }
 
+/**
+ * Sprawdza, czy stos jest pusty.
+ *
+ * @param stack - wskaźnik na stos
+ * @return informacja o "pustości"
+ */
 __device__ bool isEmptyStack(Stack* stack)
 {
 	return stack->top == -1;
 }
 
+/**
+ * Sprawdza, czy stos jest pełny.
+ *
+ * @param stack - wskaźnik na stos
+ * @return informacja o zapełnieniu stosu
+ */
 __device__ bool isFullStack(Stack* stack)
 {
 	return stack->top == STACK_SIZE - 1;
