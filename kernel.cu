@@ -58,6 +58,10 @@ __device__ bool top(Stack* stack, uint8_t* value);
 __device__ bool isEmptyStack(Stack* stack);
 __device__ bool isFullStack(Stack* stack);
 
+__device__ void setBit(uint8_t* controlArray, uint8_t index);
+__device__ void clearBit(uint8_t* controlArray, uint8_t index);
+__device__ uint8_t getBit(uint8_t* controlArray, uint8_t index);
+
 __global__ void solve(char* boards, uint16_t* masks, const unsigned int size);
 
 cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time);
@@ -74,8 +78,8 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 	char board[BOARD_SIZE]; // Lokalna tablica sudoku
 	uint16_t locmasks[MASK_ARRAY_SIZE]; // Lokalna tablica masek (maski[9 masek dla rzędów, 9 masek dla kolumn, 9 masek dla kwadratów])
 	Stack numStack, indStack; // Stosy dla liczb, które trzeba wpisać lub są wpisane w pola oraz stos indeksów, gdzie dana liczba jest lub powinna być wpisana 
-	char controlArray[RECURSION_TREE_SIZE]; // Tablica odpowiadająca za trzymanie informacji, która plansza sudoku w pamięci jest zapisana
-	controlArray[0] = 1;
+	uint8_t controlArray[RECURSION_TREE_SIZE / 8]; // Tablica odpowiadająca za trzymanie informacji, która plansza sudoku w pamięci jest zapisana (każdy bit zapisuje stan jednej tablicy)
+	setBit(controlArray, 0); // Ustawiamy, bit dla tablicy wejściowej
 	initializeStack(&numStack);
 	initializeStack(&indStack);
 	uint8_t i = 0; // Indeks tablicy, którą aktualnie rozwiązujemy
@@ -88,9 +92,9 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 	while (status != 1)
 	{
 		// Jeżeli liczba kontrolna dla tej tablicy ma 0 to oznacza, że nie ma co rozwiązywać i musimy szukać następnej tablicy
-		if (controlArray[i] != 1)
+		if (getBit(controlArray, i) != 1)
 		{
-			while (controlArray[i] != 1)
+			while (getBit(controlArray, i) != 1)
 				i = (i + 1) % RECURSION_TREE_SIZE;
 			memcpy(board, boards + blockDim.x * gridDim.x * BOARD_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
 			memcpy(locmasks, masks + blockDim.x * gridDim.x * MASK_ARRAY_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, sizeof(uint16_t) * MASK_ARRAY_SIZE);
@@ -129,7 +133,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 		{
 			if (isEmptyStack(&indStack))
 			{
-				controlArray[i] = 0;
+				clearBit(controlArray, i);
 			}
 			else
 			{
@@ -197,7 +201,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 
 				while (j != i && status != 5)
 				{
-					if (controlArray[j] == 0) // Znaleziono pustą tablicę
+					if (getBit(controlArray,j) == 0) // Znaleziono pustą tablicę
 						break;
 					j = (j + 1) % RECURSION_TREE_SIZE;
 				}
@@ -214,7 +218,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 					locmasks[GetRow(minimalpossibilities_ind)] &= ~(1 << l);
 					locmasks[GetCol(minimalpossibilities_ind) + 9] &= ~(1 << l);
 					locmasks[GetBox(minimalpossibilities_ind) + 18] &= ~(1 << l);
-					controlArray[j] = 1;
+					setBit(controlArray, j);
 				}
 
 				if (j == i && status != 5) // Nieznaleziono pustych tablica w pamięci
@@ -341,7 +345,7 @@ int main()
 	std::cout << "Whole GPU Time:    " << setw(7) << gpu_time << " nsec" << endl;
 	std::cout << "Copy to device GPU time:    " << setw(7) << gpu_copy_to_d_time << " nsec" << endl;
 	std::cout << "Algorithm GPU Time:    " << setw(7) << gpu_alg_time << " nsec" << endl;
-	std::cout << "Copy to host GPU Time:    " << setw(7) << gpu_copy_to_h_time << " nsec" << endl;
+	std::cout << "Copy to host GPU Time:    " << setw(7) << 0.001 * gpu_copy_to_h_time << " nsec" << endl;
 
 	cudaStatus = cudaDeviceReset();
 	if (cudaStatus != cudaSuccess) {
@@ -439,8 +443,8 @@ cudaError_t solvewithGPU(char* h_boards, uint16_t* h_masks, unsigned int boards,
 		goto Error;
 	}
 	auto gpu_memory_back_te = high_resolution_clock::now();
-	*copy_to_h_time += 0.001 * duration_cast<microseconds>(gpu_memory_back_te - gpu_memory_back_ts).count();
-
+	*copy_to_h_time += duration_cast<microseconds>(gpu_memory_back_te - gpu_memory_back_ts).count();
+	//printf("%d, %d\n", 0.001 * duration_cast<microseconds>(gpu_memory_back_te - gpu_memory_back_ts).count(), gpu_memory_back_ts);
 Error:
 	cudaFree(d_boards);
 	cudaFree(d_masks);
@@ -644,4 +648,49 @@ __device__ bool isEmptyStack(Stack* stack)
 __device__ bool isFullStack(Stack* stack)
 {
 	return stack->top == STACK_SIZE - 1;
+}
+
+/**
+ * Funkcja ustawiająca bit o indeksie podanym na 1.
+ *
+ * @param controlArray - wskaźnik do tablicy, w której zmieniamy wartość bitów
+ * @param index - index zmienianego bita w tablicy
+ */
+__device__ void setBit(uint8_t* controlArray, uint8_t index)
+{
+	if (index < 0 || index >= RECURSION_TREE_SIZE)
+		printf("Zły index!\n");
+	else
+		controlArray[index / 8] |= (1 << (index % 8));
+}
+
+/**
+ * Funkcja ustawiająca bit o indeksie podanym na 0.
+ *
+ * @param controlArray - wskaźnik do tablicy, w której zmieniamy wartość bitów
+ * @param index - index zmienianego bita w tablicy
+ */
+__device__ void clearBit(uint8_t* controlArray, uint8_t index)
+{
+	if (index < 0 || index >= RECURSION_TREE_SIZE)
+		printf("Zły index!\n");
+	else
+		controlArray[index / 8] &= ~(1 << (index % 8));
+}
+
+/**
+ * Funkcja pobierająca wartość bita na pozycji podanej przez index.
+ *
+ * @param controlArray - wskaźnik do tablicy, z której czytamy wartość bitów
+ * @param index - index czytanego bita w tablicy
+ * 
+ * @returns Wartości bita, czyli 1 lub 0, albo 3, gdy został podany zły indeks i wystąpił błąd
+ */
+__device__ uint8_t getBit(uint8_t* controlArray, uint8_t index) {
+	if (index < 0 || index >= RECURSION_TREE_SIZE)
+	{
+		printf("Zły index!\n");
+		return 3;
+	}
+	return (controlArray[index / 8] & (1 << (index % 8))) != 0;
 }
