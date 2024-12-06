@@ -25,7 +25,7 @@ using namespace std::chrono;
 
 #define BOARD_SIZE 81 // BOARD_DIM * BOARD_DIM cała wielkość planszy
 
-#define MAX_BOARDS 1000010 // ilość plansz sudoku jakie przetworzy program (najlepiej wielokrotność THREADS_IN_BLOCK * MAX_BLOCKS)
+#define MAX_BOARDS 1044480 // ilość plansz sudoku jakie maksymalnie przetworzy program (najlepiej wielokrotność THREADS_IN_BLOCK * MAX_BLOCKS)
 
 #define MASK_ARRAY_SIZE 27 // wielkość tablicy masek potrzebnych na opisanie jednej planszy
 
@@ -35,10 +35,17 @@ using namespace std::chrono;
 
 #define THREADS_IN_BLOCK 256 // ilość wątków w bloku (wielokrotność 32)
 
-#define STACK_SIZE 40 // wielkość stacku dla wątku, który nie ma już wolnych tablic do dyspozycji
+#define STACK_SIZE 100 // wielkość stacku dla wątku, który nie ma już wolnych tablic do dyspozycji (dla przesłanego zestawu sudoku wystarcza o wiele mniej, ale dla trudniejszych robi się problem)
+
+#define INPUTFILE_PATH "sudoku.csv" // ścieżka do pliku z planszami sudoku
+
+#define CPU_OUTPUTFILE_PATH "cpu_output.txt" // ścieżka do pliku do zapisu wyników z cpu
+
+#define GPU_OUTPUTFILE_PATH "gpu_output.txt" // ścieżka do pliku do zapisu wyników z gpu
 
 __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask);
 __host__ void print_board(char* board);
+__host__ bool validateSudoku(char* board);
 __host__ bool sudokuCheck(char* board);
 __host__ __device__ uint8_t GetRow(uint8_t ind);
 __host__ __device__ uint8_t GetCol(uint8_t ind);
@@ -51,6 +58,7 @@ typedef struct Stack
 	int8_t top;
 } Stack;
 
+// Funkcje dla stosu w device
 __device__ void initializeStack(Stack* stack);
 __device__ bool push(Stack* stack, uint8_t value);
 __device__ bool pop(Stack* stack, uint8_t* value);
@@ -58,13 +66,16 @@ __device__ bool top(Stack* stack, uint8_t* value);
 __device__ bool isEmptyStack(Stack* stack);
 __device__ bool isFullStack(Stack* stack);
 
+// Funkcje dla controlArray w device
 __device__ void setBit(uint8_t* controlArray, uint8_t index);
 __device__ void clearBit(uint8_t* controlArray, uint8_t index);
 __device__ uint8_t getBit(uint8_t* controlArray, uint8_t index);
 
+// Kernel rozwiązujący sudoku
 __global__ void solve(char* boards, uint16_t* masks, const unsigned int size);
 
-cudaError_t solvewithGPU(char* h_boards, unsigned int boards, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time);
+// Tutaj jest wywołanie kernela
+cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, uint16_t* d_masks, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time);
 
 /**
  * Funckja wykonująca algorytm rozwiązywania sudoku.
@@ -102,7 +113,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 				locmasks[18 + GetBox(p)] |= 1 << (number - 1);
 			}
 		}
-		
+
 		// Zapisanie maski tablicy początkowej
 		memcpy(masks + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
 
@@ -111,8 +122,13 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 			// Jeżeli liczba kontrolna dla tej tablicy ma 0 to oznacza, że nie ma co rozwiązywać i musimy szukać następnej tablicy
 			if (getBit(controlArray, i) != 1)
 			{
-				while (getBit(controlArray, i) != 1)
+				uint8_t old_i = i;
+				i = (i + 1) % RECURSION_TREE_SIZE;
+				while (getBit(controlArray, i) != 1 && old_i != i)
 					i = (i + 1) % RECURSION_TREE_SIZE;
+				if (old_i == i)
+					break;
+
 				memcpy(board, boards + blockDim.x * gridDim.x * BOARD_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
 				memcpy(locmasks, masks + blockDim.x * gridDim.x * MASK_ARRAY_SIZE * i + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, sizeof(uint16_t) * MASK_ARRAY_SIZE);
 				j = (i + 1) % RECURSION_TREE_SIZE;
@@ -266,35 +282,66 @@ __global__ void rozgrzewka(int i)
 
 int main()
 {
-	FILE* inputfile = fopen("C:/Users/Piotr/Desktop/Sudoku/sudoku.csv", "r");
+	FILE* inputfile = fopen(INPUTFILE_PATH, "r");
 	if (inputfile == NULL)
 	{
 		fprintf(stderr, "Nie można otworzyć pliku z danymi\n");
 		return 1;
 	}
 
-	FILE* cpu_outputfile = fopen("cpu_output.txt", "w");
+	FILE* cpu_outputfile = fopen(CPU_OUTPUTFILE_PATH, "w");
 	if (cpu_outputfile == NULL)
 	{
 		fprintf(stderr, "Nie można otworzyć pliku do zapisu wyników z cpu\n");
+		fclose(inputfile);
 		return 1;
 	}
 
-	FILE* gpu_outputfile = fopen("gpu_output.txt", "w");
+	FILE* gpu_outputfile = fopen(GPU_OUTPUTFILE_PATH, "w");
 	if (gpu_outputfile == NULL)
 	{
 		fprintf(stderr, "Nie można otworzyć pliku do zapisu wyników z gpu\n");
+		fclose(inputfile);
+		fclose(cpu_outputfile);
 		return 1;
 	}
 
-	char boards[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE];
-	int boards_count = 0;
-	char cpu_solutions[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE];
-	long long cpu_time = 0, gpu_time = 0, gpu_alg_time = 0, gpu_copy_to_d_time = 0, gpu_copy_to_h_time = 0;
-	int done = 0;
-	int cpu_correct_boards = 0, gpu_correct_boards = 0;
-	char line[83];
+	char boards[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE]; // Tablica na plansze sudoku wczytane z pliku o wielkości maksymalnej gla GPU
+	char cpu_solutions[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE]; // Tablica rozwiązania CPU
+	long long cpu_time = 0, gpu_time = 0, gpu_alg_time = 0, gpu_copy_to_d_time = 0, gpu_copy_to_h_time = 0, gpu_alloc_time = 0, check_and_save_time = 0;
+	int done = 0, boards_count = 0, cpu_correct_boards = 0, gpu_correct_boards = 0;
+	char line[83]; // Tablica na linie wczytaną z pliku
+
+	// Zmienne Cuda
 	cudaError_t cudaStatus;
+	char* d_boards;
+	uint16_t* d_masks;
+
+	auto gpu_alloc_ts = high_resolution_clock::now();
+	cudaStatus = cudaSetDevice(0);
+	if (cudaStatus != cudaSuccess)
+	{
+		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?\n");
+		goto Error;
+	}
+
+	// Alokujemy pamięć na tablice w GPU
+	cudaStatus = cudaMalloc(&d_boards, sizeof(char) * BOARD_SIZE * MAX_BLOCKS * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
+	if (cudaStatus != cudaSuccess)
+	{
+		fprintf(stderr, "cudaMalloc d_boards failes!\n");
+		goto Error;
+	}
+
+	// Alokujemy pamięć na maski w GPU
+	cudaStatus = cudaMalloc(&d_masks, sizeof(uint16_t) * MASK_ARRAY_SIZE * MAX_BLOCKS * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
+	auto gpu_alloc_te = high_resolution_clock::now();
+	if (cudaStatus != cudaSuccess)
+	{
+		fprintf(stderr, "cudaMalloc d_masks failes!\n");
+		goto Error;
+	}
+	gpu_alloc_time = 0.001 * duration_cast<microseconds> (gpu_alloc_te - gpu_alloc_ts).count();
 
 	// Część rozgrzewająca GPU
 	rozgrzewka <<<1, 512 >>> (2);
@@ -302,19 +349,27 @@ int main()
 	if (cudaStatus != cudaSuccess)
 	{
 		fprintf(stderr, "cudaDeviceSynchronize failes %s!\n", cudaGetErrorString(cudaStatus));
-		return 1;
+		goto Error;
 	}
-
-
 
 	while (fgets(line, 83, inputfile) && done + boards_count < MAX_BOARDS)
 	{
 		memcpy(boards + boards_count * BOARD_SIZE, line, sizeof(char) * 81);
-	
-		boards_count++;
-	
-		if (boards_count == (THREADS_IN_BLOCK * MAX_BLOCKS))
+
+		// Sprawdzamy, czy sudoku jest poprawnie zapisane, oraz czy ma conajmniej 17 liczb innych od 0
+		if (!validateSudoku(&boards[boards_count * BOARD_SIZE]))
 		{
+			char zeroBoard[BOARD_SIZE] = { 0 };
+			fprintf(stderr, "Invalid board\n");
+			memcpy(&boards[boards_count * BOARD_SIZE], zeroBoard, sizeof(char) * BOARD_SIZE);
+			continue;
+		}
+
+		boards_count++;
+
+		if (boards_count == (THREADS_IN_BLOCK * MAX_BLOCKS)) // Zapełniony cały batch
+		{
+			// Rozwiązanie CPU
 			auto cpu_ts = high_resolution_clock::now();
 			for (int i = 0; i < boards_count; i++)
 			{
@@ -322,7 +377,9 @@ int main()
 			}
 			auto cpu_te = high_resolution_clock::now();
 			cpu_time += 0.001 * duration_cast<microseconds> (cpu_te - cpu_ts).count();
-	
+
+			// Sprawdzanie rozwiązań CPU i zapisanie w pliku
+			auto cpu_check_and_save_ts_1 = high_resolution_clock::now();
 			for (int i = 0; i < boards_count; i++)
 			{
 				if (sudokuCheck(cpu_solutions + BOARD_SIZE * i))
@@ -330,9 +387,12 @@ int main()
 				fwrite(cpu_solutions + BOARD_SIZE * i, sizeof(char), BOARD_SIZE, cpu_outputfile);
 				fputc('\n', cpu_outputfile);
 			}
-	
+			auto cpu_check_and_save_te_1 = high_resolution_clock::now();
+			check_and_save_time += 0.001 * duration_cast<microseconds> (cpu_check_and_save_te_1 - cpu_check_and_save_ts_1).count();
+
+			// Rozwiązanie GPU
 			auto gpu_ts = high_resolution_clock::now();
-			cudaStatus = solvewithGPU(boards, boards_count, &gpu_copy_to_d_time, &gpu_alg_time, &gpu_copy_to_h_time);
+			cudaStatus = solvewithGPU(boards, boards_count,d_boards, d_masks, &gpu_copy_to_d_time, &gpu_alg_time, &gpu_copy_to_h_time);
 			auto gpu_te = high_resolution_clock::now();
 			if (cudaStatus != cudaSuccess)
 			{
@@ -340,7 +400,9 @@ int main()
 				return 1;
 			}
 			gpu_time += 0.001 * duration_cast<microseconds> (gpu_te - gpu_ts).count();
-	
+
+			// Sprawdzanie rozwiązań GPU i zapisanie w pliku
+			auto gpu_check_and_save_ts_1 = high_resolution_clock::now();
 			for (int i = 0; i < boards_count; i++)
 			{
 				if (sudokuCheck(boards + BOARD_SIZE * i))
@@ -348,14 +410,19 @@ int main()
 				fwrite(boards + BOARD_SIZE * i, sizeof(char), BOARD_SIZE, gpu_outputfile);
 				fputc('\n', gpu_outputfile);
 			}
+			auto gpu_check_and_save_te_1 = high_resolution_clock::now();
+			check_and_save_time += 0.001 * duration_cast<microseconds> (gpu_check_and_save_te_1 - gpu_check_and_save_ts_1).count();
+
 			done += boards_count;
 			printf("Zrobilismy: %d\n", done);
 			boards_count = 0;
 		}
 	}
 
+	// Plik się skończył, a batch nie został zapełniony więc dla wczytanych i nie rozwiązanych już plansz wywołujemy algorytmy
 	if (boards_count != 0)
 	{
+		// Rozwiązanie CPU
 		auto cpu_ts = high_resolution_clock::now();
 		for (int i = 0; i < boards_count; i++)
 		{
@@ -364,6 +431,8 @@ int main()
 		auto cpu_te = high_resolution_clock::now();
 		cpu_time += 0.001 * duration_cast<microseconds> (cpu_te - cpu_ts).count();
 
+		// Sprawdzanie rozwiązań CPU i zapisanie w pliku
+		auto cpu_check_and_save_ts_2 = high_resolution_clock::now();
 		for (int i = 0; i < boards_count; i++)
 		{
 			if (sudokuCheck(cpu_solutions + BOARD_SIZE * i))
@@ -371,9 +440,12 @@ int main()
 			fwrite(cpu_solutions + BOARD_SIZE * i, sizeof(char), BOARD_SIZE, cpu_outputfile);
 			fputc('\n', cpu_outputfile);
 		}
+		auto cpu_check_and_save_te_2 = high_resolution_clock::now();
+		check_and_save_time += 0.001 * duration_cast<microseconds> (cpu_check_and_save_te_2 - cpu_check_and_save_ts_2).count();
 
+		// Rozwiązanie GPU
 		auto gpu_ts = high_resolution_clock::now();
-		cudaStatus = solvewithGPU(boards, boards_count, &gpu_copy_to_d_time, &gpu_alg_time, &gpu_copy_to_h_time);
+		cudaStatus = solvewithGPU(boards, boards_count, d_boards, d_masks, &gpu_copy_to_d_time, &gpu_alg_time, &gpu_copy_to_h_time);
 		auto gpu_te = high_resolution_clock::now();
 		if (cudaStatus != cudaSuccess)
 		{
@@ -382,6 +454,8 @@ int main()
 		}
 		gpu_time += 0.001 * duration_cast<microseconds> (gpu_te - gpu_ts).count();
 
+		// Sprawdzanie rozwiązań GPU i zapisanie w pliku
+		auto gpu_check_and_save_ts_2 = high_resolution_clock::now();
 		for (int i = 0; i < boards_count; i++)
 		{
 			if (sudokuCheck(boards + BOARD_SIZE * i))
@@ -389,6 +463,9 @@ int main()
 			fwrite(boards + BOARD_SIZE * i, sizeof(char), BOARD_SIZE, gpu_outputfile);
 			fputc('\n', gpu_outputfile);
 		}
+		auto gpu_check_and_save_te_2 = high_resolution_clock::now();
+		check_and_save_time += 0.001 * duration_cast<microseconds> (gpu_check_and_save_te_2 - gpu_check_and_save_ts_2).count();
+
 		done += boards_count;
 		printf("Zrobilismy: %d\n", done);
 	}
@@ -396,95 +473,79 @@ int main()
 	fputc('\0', cpu_outputfile);
 	fputc('\0', gpu_outputfile);
 
-	std::cout << "CPU Time:    " << setw(7) << cpu_time << " nsec" << endl;
-	std::cout << "Whole GPU Time:    " << setw(7) << gpu_time << " nsec" << endl;
-	std::cout << "Copy to device GPU time:    " << setw(7) << gpu_copy_to_d_time << " nsec" << endl;
-	std::cout << "Algorithm GPU Time:    " << setw(7) << gpu_alg_time << " nsec" << endl;
-	std::cout << "Copy to host GPU Time:    " << setw(7) << 0.001 * gpu_copy_to_h_time << " nsec" << endl;
-
+	std::cout << "CPU time:    " << setw(7) << cpu_time << " nsec" << endl;
+	std::cout << "Whole GPU time:    " << setw(7) << gpu_time + gpu_alloc_time << " nsec" << endl;
+	std::cout << "GPU memory alloc + SetDevice time:    " << setw(7) << gpu_alloc_time << " nsec" << endl;
+	std::cout << "Copy to device GPU time:    " << setw(7) << 0.001 * gpu_copy_to_d_time << " nsec" << endl;
+	std::cout << "Algorithm GPU time:    " << setw(7) << gpu_alg_time << " nsec" << endl;
+	std::cout << "Copy to host GPU time:    " << setw(7) << 0.001 * gpu_copy_to_h_time << " nsec" << endl;
+	std::cout << "Save to file and check time:    " << setw(7) << check_and_save_time << " nsec" << endl;
 	std::cout << "CPU correct solutions: " << setw(7) << cpu_correct_boards << endl;
 	std::cout << "GPU correct solutions: " << setw(7) << gpu_correct_boards << endl;
 
 	cudaStatus = cudaDeviceReset();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "cudaDeviceReset failed!\n");
-		return 1;
+		goto Error;
 	}
 
+Error:
 	fclose(inputfile);
 	fclose(cpu_outputfile);
 	fclose(gpu_outputfile);
+	cudaFree(d_boards);
+	cudaFree(d_masks);
 
 	return 0;
 }
 
 /**
- * Funckja pomocnicza, agregująca wszystkie wywołania CUDA (alokacja pamięci na GPU, zapis danych do GPU, algorytm, odczyt wyników z GPU, zwolnienie pamięci)
+ * Funckja pomocnicza, agregująca główne wywołania w programie CUDA ( zapis danych do GPU, algorytm, odczyt wyników z GPU)
  *
  * @param[in] h_boards - tablica, w której zapisane są plansze sudoku po stronie hosta
  * @param[in] boards - ilość tablic do rozwiązania
+ * @param[in] d_boards - wskaźnik na plansze sudoku w GPU
+ * @param[in] d_masks - wskaźnik na tablice masek w GPU
  * @param[out] copy_to_d_time - wskaźnik na zmienną z czasem, w jakim kopiujemy dane z hosta do GPU
  * @param[out] alg_time - wskaźnik na zmienną z czasem, w jakim wykonujemy funckję rozwiązywania sudoku (algorytm)
  * @param[out] copy_to_h_time - wskaźnik na zmienną z czasem, w jakim kopiujemy dane z GPU do hosta
  * @return możliwy error, który zaszedł podczas "CUDA-owych" operacji
  */
-cudaError_t solvewithGPU(char* h_boards, unsigned int boards, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time)
+cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, uint16_t* d_masks, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time)
 {
 	cudaError_t cudaStatus;
 
-	char* d_boards;
-
-	uint16_t* d_masks;
-
+	// Ustawienie wystarczającej ilości bloków dla podanej w boards ilości plansz
 	int blocks = 0;
 	if (boards % THREADS_IN_BLOCK != 0)
 		blocks = ((boards - (boards % THREADS_IN_BLOCK)) / THREADS_IN_BLOCK) + 1;
 	else
 		blocks = boards / THREADS_IN_BLOCK;
 
-	cudaStatus = cudaSetDevice(0);
-	if (cudaStatus != cudaSuccess)
-	{
-		fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?\n");
-		goto Error;
-	}
-
-	auto gpu_memory_alloc_ts = high_resolution_clock::now();
-	cudaStatus = cudaMalloc(&d_boards, sizeof(char) * BOARD_SIZE * blocks * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
-	if (cudaStatus != cudaSuccess)
-	{
-		fprintf(stderr, "cudaMalloc d_boards failes!\n");
-		goto Error;
-	}
-
-	cudaStatus = cudaMalloc(&d_masks, sizeof(uint16_t) * MASK_ARRAY_SIZE * blocks * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
-	if (cudaStatus != cudaSuccess)
-	{
-		fprintf(stderr, "cudaMalloc d_masks failes!\n");
-		goto Error;
-	}
-
+	// Przekopiowanie plansz do GPU
+	auto gpu_memory_copy_ts = high_resolution_clock::now();
 	cudaStatus = cudaMemcpy(d_boards, h_boards, sizeof(char) * BOARD_SIZE * boards, cudaMemcpyHostToDevice);
+	auto gpu_memory_copy_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
 	{
 		fprintf(stderr, "cudaMemcpy d_boards failes!\n");
 		goto Error;
 	}
+	*copy_to_d_time += duration_cast<microseconds>(gpu_memory_copy_te - gpu_memory_copy_ts).count();
 
-	auto gpu_memory_alloc_te = high_resolution_clock::now();
-	*copy_to_d_time += 0.001 * duration_cast<microseconds>(gpu_memory_alloc_te - gpu_memory_alloc_ts).count();
-
+	// Wywołanie algorytmu rozwiązywania sudoku
 	auto gpu_sol_ts = high_resolution_clock::now();
-	solve <<<blocks, THREADS_IN_BLOCK >>> (d_boards, d_masks, boards);
+	solve <<<blocks, THREADS_IN_BLOCK>>> (d_boards, d_masks, boards);
 	cudaStatus = cudaDeviceSynchronize();
 	auto gpu_sol_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
 	{
-		fprintf(stderr, "cudaDeviceSynchronize failes %s!\n", cudaGetErrorString(cudaStatus));
+		fprintf(stderr, "cudaDeviceSynchronize failes: %s!\n", cudaGetErrorString(cudaStatus));
 		goto Error;
 	}
 	*alg_time += 0.001 * duration_cast<microseconds>(gpu_sol_te - gpu_sol_ts).count();
 
+	// Pobranie do hosta rozwiązanych plansz
 	auto gpu_memory_back_ts = high_resolution_clock::now();
 	cudaStatus = cudaMemcpy(h_boards, d_boards, sizeof(char) * BOARD_SIZE * boards, cudaMemcpyDeviceToHost);
 	if (cudaStatus != cudaSuccess)
@@ -494,11 +555,7 @@ cudaError_t solvewithGPU(char* h_boards, unsigned int boards, long long* copy_to
 	}
 	auto gpu_memory_back_te = high_resolution_clock::now();
 	*copy_to_h_time += duration_cast<microseconds>(gpu_memory_back_te - gpu_memory_back_ts).count();
-	//printf("%d, %d\n", 0.001 * duration_cast<microseconds>(gpu_memory_back_te - gpu_memory_back_ts).count(), gpu_memory_back_ts);
 Error:
-	cudaFree(d_boards);
-	cudaFree(d_masks);
-
 	return cudaStatus;
 }
 
@@ -524,7 +581,7 @@ __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask)
 /**
  * Wypisuje planszę w konsoli.
  *
- * @param board Plansza do wypisania.
+ * @param board - plansza do wypisania.
  */
 __host__ void print_board(char* board)
 {
@@ -548,10 +605,40 @@ __host__ void print_board(char* board)
 }
 
 /**
+ * Sprawdza plansze pobraną z pliku w prostu sposób, czy jest możliwa do rozwiązania oraz, czy ma jedno rozwiązanie.
+ *
+ * @param board - plansza do sprawdzenia.
+ * 
+ * @returns Poprawność planszy
+ */
+__host__ bool validateSudoku(char* board)
+{
+	int not_zeroes_count = 0;
+	uint16_t masks[MASK_ARRAY_SIZE] = { 0 };
+
+	for (int i = 0; i < BOARD_SIZE; i++)
+	{
+		int num = board[i] - '0';
+
+		if ((masks[GetRow(i)] >> (num - 1)) & 1 || (masks[9 + GetCol(i)] >> (num - 1)) & 1 || (masks[18 + GetBox(i)] >> (num - 1)) & 1)
+			return false;
+
+		masks[GetRow(i)] |= 1 << (num - 1);
+		masks[9 + GetCol(i)] |= 1 << (num - 1);
+		masks[18 + GetBox(i)] |= 1 << (num - 1);
+		not_zeroes_count++;
+	}
+
+	if (not_zeroes_count < 17)
+		return false;
+	return true;
+}
+
+/**
  * Sprawdza rozwiązaną plansze sudoku.
  *
  * @param board - wskaźnik na plansze do sprawdzenia
- * 
+ *
  * @returns poprawność planszy
  */
 __host__ bool sudokuCheck(char* board)
@@ -730,7 +817,7 @@ __device__ void clearBit(uint8_t* controlArray, uint8_t index)
  *
  * @param controlArray - wskaźnik do tablicy, z której czytamy wartość bitów
  * @param index - index czytanego bita w tablicy
- * 
+ *
  * @returns Wartości bita, czyli 1 lub 0, albo 3, gdy został podany zły indeks i wystąpił błąd
  */
 __device__ uint8_t getBit(uint8_t* controlArray, uint8_t index) {
