@@ -280,19 +280,23 @@ __global__ void rozgrzewka(int i)
 	int res = threadIdx.x * i;
 }
 
-int main()
+int main(int argc, char** argv)
 {
-	FILE* inputfile = fopen(INPUTFILE_PATH, "r");
+	FILE* inputfile;
+	if (argc < 2)
+		inputfile = fopen(INPUTFILE_PATH, "r");
+	else
+		inputfile = fopen(argv[1], "r");
 	if (inputfile == NULL)
 	{
-		fprintf(stderr, "Nie można otworzyć pliku z danymi\n");
+		fprintf(stderr, "Nie mozna otworzyc pliku z danymi\n");
 		return 1;
 	}
 
 	FILE* cpu_outputfile = fopen(CPU_OUTPUTFILE_PATH, "w");
 	if (cpu_outputfile == NULL)
 	{
-		fprintf(stderr, "Nie można otworzyć pliku do zapisu wyników z cpu\n");
+		fprintf(stderr, "Nie mozna otworzyc pliku do zapisu wynikow z cpu\n");
 		fclose(inputfile);
 		return 1;
 	}
@@ -300,7 +304,7 @@ int main()
 	FILE* gpu_outputfile = fopen(GPU_OUTPUTFILE_PATH, "w");
 	if (gpu_outputfile == NULL)
 	{
-		fprintf(stderr, "Nie można otworzyć pliku do zapisu wyników z gpu\n");
+		fprintf(stderr, "Nie mozna otworzyc pliku do zapisu wynikow z gpu\n");
 		fclose(inputfile);
 		fclose(cpu_outputfile);
 		return 1;
