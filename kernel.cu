@@ -19,29 +19,29 @@
 using namespace std;
 using namespace std::chrono;
 
-#define BOX_DIM 3 // Wymiar kwadracików w środku sudoku
+#define BOX_DIM 3 // Box dimension inside of sudoku
 
-#define BOARD_DIM 9 // BOX_DIM * BOX_DIM wymiar planszy
+#define BOARD_DIM 9 // Board dimension
 
-#define BOARD_SIZE 81 // BOARD_DIM * BOARD_DIM cała wielkość planszy
+#define BOARD_SIZE 81 // Board size (9x9)
 
-#define MAX_BOARDS 1044480 // ilość plansz sudoku jakie maksymalnie przetworzy program (najlepiej wielokrotność THREADS_IN_BLOCK * MAX_BLOCKS)
+#define MAX_BOARDS 1044480 // Number of boards that can be processed by the program (for best performance would be a multiple of THREADS_IN_BLOCK * MAX_BLOCKS), if the number is bigger than number of boards in the file program will solve as many as in the file
 
-#define MASK_ARRAY_SIZE 27 // wielkość tablicy masek potrzebnych na opisanie jednej planszy
+#define MASK_ARRAY_SIZE 27 // Size of masks array (9 masks for rows, 9 masks for columns, 9 masks for boxes)
 
-#define RECURSION_TREE_SIZE 256 // ilość plansz jakie każdy wątek ma dla siebie do dyspozycji (najlepiej wielokrotność 8)
+#define RECURSION_TREE_SIZE 256 // Number of boards that can be used 
 
-#define MAX_BLOCKS 240 // ilość bloków, które będą zakolejkowane przez karte
+#define MAX_BLOCKS 240 // Number of blocks that will be queued up for GPU
 
-#define THREADS_IN_BLOCK 256 // ilość wątków w bloku (wielokrotność 32)
+#define THREADS_IN_BLOCK 256 // Number of threads in one block
 
-#define STACK_SIZE 100 // wielkość stacku dla wątku, który nie ma już wolnych tablic do dyspozycji (dla przesłanego zestawu sudoku wystarcza o wiele mniej, ale dla trudniejszych robi się problem)
+#define STACK_SIZE 100 // The size of stack for a thread, that doesn't have a free space for a new board in its GPU memory
 
-#define INPUTFILE_PATH "sudoku.csv" // ścieżka do pliku z planszami sudoku
+#define INPUTFILE_PATH "sudoku.csv" // Path to the input file with sudoku boards
 
-#define CPU_OUTPUTFILE_PATH "cpu_output.txt" // ścieżka do pliku do zapisu wyników z cpu
+#define CPU_OUTPUTFILE_PATH "cpu_output.txt" // Path to the file for saving results from CPU
 
-#define GPU_OUTPUTFILE_PATH "gpu_output.txt" // ścieżka do pliku do zapisu wyników z gpu
+#define GPU_OUTPUTFILE_PATH "gpu_output.txt" // Path to the file for saving results from GPU
 
 __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask);
 __host__ void print_board(char* board);
@@ -51,14 +51,14 @@ __host__ __device__ uint8_t GetRow(uint8_t ind);
 __host__ __device__ uint8_t GetCol(uint8_t ind);
 __host__ __device__ uint8_t GetBox(uint8_t ind);
 
-// Struktura dla stosu
+// Stack structure definition
 typedef struct Stack
 {
 	uint8_t data[STACK_SIZE];
 	int8_t top;
 } Stack;
 
-// Funkcje dla stosu w device
+// Stack functions in device
 __device__ void initializeStack(Stack* stack);
 __device__ bool push(Stack* stack, uint8_t value);
 __device__ bool pop(Stack* stack, uint8_t* value);
@@ -66,43 +66,43 @@ __device__ bool top(Stack* stack, uint8_t* value);
 __device__ bool isEmptyStack(Stack* stack);
 __device__ bool isFullStack(Stack* stack);
 
-// Funkcje dla controlArray w device
+// Functions for controlArray in device
 __device__ void setBit(uint8_t* controlArray, uint8_t index);
 __device__ void clearBit(uint8_t* controlArray, uint8_t index);
 __device__ uint8_t getBit(uint8_t* controlArray, uint8_t index);
 
-// Kernel rozwiązujący sudoku
+// Sudoku solving kernel function
 __global__ void solve(char* boards, uint16_t* masks, const unsigned int size);
 
-// Tutaj jest wywołanie kernela
+// Function that aggregates the main CUDA calls (copying data to GPU, algorithm, reading results from GPU)
 cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, uint16_t* d_masks, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time);
 
 /**
- * Funckja wykonująca algorytm rozwiązywania sudoku.
+ * Function that executes the sudoku solving algorithm on the GPU.
  *
- * @param boards - wskaźnik do tablicy, w której zapisane są plansze sudoku plus miejsca wolne na nowe plansze
- * @param masks - wskaźnik do tablicy, w której zapisane są maski dla plansz sudoku plus miejsca wolne na nowe maski dla nowych plansz
- * @param size - ilość tablic do rozwiązania
+ * @param boards - pointer to boards table, in which the boards are stored and there is a place for new ones.
+ * @param masks - pointer to masks table, in which the masks are stored for sudoku boards and there is a place for new ones.
+ * @param size - number of boards to solve in this kernel call.
  */
 __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 {
 	if (threadIdx.x + blockDim.x * blockIdx.x < size)
 	{
-		char board[BOARD_SIZE]; // Lokalna tablica sudoku
-		uint16_t locmasks[MASK_ARRAY_SIZE] = { 0 }; // Lokalna tablica masek (maski[9 masek dla rzędów, 9 masek dla kolumn, 9 masek dla kwadratów])
-		Stack numStack, indStack; // Stosy dla liczb, które trzeba wpisać lub są wpisane w pola oraz stos indeksów, gdzie dana liczba jest lub powinna być wpisana 
-		uint8_t controlArray[RECURSION_TREE_SIZE / 8]; // Tablica odpowiadająca za trzymanie informacji, która plansza sudoku w pamięci jest zapisana (każdy bit zapisuje stan jednej tablicy)
-		setBit(controlArray, 0); // Ustawiamy, bit dla tablicy wejściowej
+		char board[BOARD_SIZE]; // Local sudoku board for the thread
+		uint16_t locmasks[MASK_ARRAY_SIZE] = { 0 }; // Local mask table (masks[9 masks for rows, 9 masks for columns, 9 masks for small boxes])
+		Stack numStack, indStack; // Stack for numbers and indices, where the number is or should be written (in case of backtracking when memory is full)
+		uint8_t controlArray[RECURSION_TREE_SIZE / 8]; // Array for controlling the recursion tree, where each bit represents whether a board is free (0) or occupied (1) in the memory
+		setBit(controlArray, 0); // Setting the first bit to 1 for the first board, which is always the initial board
 		initializeStack(&numStack);
 		initializeStack(&indStack);
-		uint8_t i = 0; // Indeks tablicy, którą aktualnie rozwiązujemy
-		uint8_t j = (i + 1) % RECURSION_TREE_SIZE; // Indeks, od którego będziemy szukać pustej tablicy
-		uint8_t status = 0; // To jest zamiast booli 1 - done rozpatrywanej tablicy, 2 - error rozpatrywanej tablicy
+		uint8_t i = 0; // Index of the board that we are currently solving
+		uint8_t j = (i + 1) % RECURSION_TREE_SIZE; // Index of the next potential free board in the memory, that we will start looking from
+		uint8_t status = 0; // Used instead of booles 1 - done, 2 - error
 
-		// Pobranie tablicy początkowej
+		// Getting the initial board
 		memcpy(board, boards + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, sizeof(char) * BOARD_SIZE);
 
-		// Wyliczenie maski dla tablicy początkowej
+		// Mask calculation for the initial array
 		for (uint8_t p = 0; p < BOARD_SIZE; p++)
 		{
 			uint8_t number = board[p] - '0';
@@ -114,12 +114,12 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 			}
 		}
 
-		// Zapisanie maski tablicy początkowej
+		// Saving the initial array mask
 		memcpy(masks + (blockDim.x * blockIdx.x + threadIdx.x) * MASK_ARRAY_SIZE, locmasks, sizeof(uint16_t) * MASK_ARRAY_SIZE);
 
 		while (status != 1)
 		{
-			// Jeżeli liczba kontrolna dla tej tablicy ma 0 to oznacza, że nie ma co rozwiązywać i musimy szukać następnej tablicy
+			// If the control number is 0 we have to find the next board to solve
 			if (getBit(controlArray, i) != 1)
 			{
 				uint8_t old_i = i;
@@ -136,23 +136,23 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 
 			uint8_t minimalpossibilities = 9;
 			uint8_t minimalpossibilities_ind = 82;
-			status = 1; // Status ten oznacza, że plansza skończona. W pętli, gdy napotkamy 0 zmieniamy ten status na 0, jako nie skończona.
+			status = 1; // This status means that the board is finished. In the loop, when we encounter 0, we change this status to 0, as not finished
 
-			// Iteracja po wszystkich komórkach sudoku
+			// Loop over all cells in the board
 			for (uint8_t k = 0; k < BOARD_SIZE; k++)
 			{
 				if (board[k] == '0')
 				{
-					status = 0; // Ustawiamy status, że jeszcze nie jest skończona ta plansza
-					uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18]; // Suma masek dla tej komórki
+					status = 0; // Setting the stauts to 0, because the board is not finished yet
+					uint16_t mask = (locmasks[GetRow(k)] | locmasks[GetCol(k) + 9]) | locmasks[GetBox(k) + 18]; // Sum of masks for this cell
 
-					// Jeżeli pierwsze 9 bitów zapełnionych, a dalej jest 0 w tej komórce, więc mamy błąd na planszy
+					// If the first 9 bits are filled and there is still 0 in this cell, we have an error on the board
 					if (mask == 0x01FF)
 					{
 						status = 2;
 						break;
 					}
-					// Jeżeli znaleźliśmy komórkę z mniejszą ilością wolnych liczb do nie do wpisania to ją zapamiętujemy
+					// If we found a cell with less possibilities than the current minimalpossibilities, we save it
 					else if (minimalpossibilities > cellmask_to_possibilities(mask))
 					{
 						minimalpossibilities = cellmask_to_possibilities(mask);
@@ -161,7 +161,7 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 				}
 			}
 
-			// Ta plansza nie ma rozwiązania
+			// This board doesnt have a valid solution
 			if (status == 2)
 			{
 				if (isEmptyStack(&indStack))
@@ -195,36 +195,36 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 				}
 			}
 
-			// Udało się rozwiązać sudoku
+			// Sudoku solved
 			if (status == 1)
 			{
 				memcpy(boards + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
 			}
 
-			// Nie rozwiązaliśmy do końca sudoku, ale nie napotkaliśmy też jeszcze błędu
+			// Isn't solved yet, but we have a cell with some possibilities to fill in
 			if (status == 0)
 			{
 				uint8_t k = 0;
-				// Maska dla danej komórki (suma masek z rzędu, kolumny i kwadracika)
+				// Sum mask for the cell with minimal possibilities
 				uint16_t combineMask = (locmasks[GetRow(minimalpossibilities_ind)] | locmasks[GetCol(minimalpossibilities_ind) + 9]) | locmasks[GetBox(minimalpossibilities_ind) + 18];
 
-				// Iterujemy się po wszystkich 9 możliwych cyfrach w sudoku
+				// Iterating over all 9 possible digits in sudoku
 				for (uint8_t l = 0; l < 9; l++)
 				{
-					if ((combineMask >> l) & 1) // Jeżeli jest 1 na pozycji l to znaczy, że już jest zajęta ta liczba i można iść dalej
+					if ((combineMask >> l) & 1) // If the digit is already used in the row, column or box, we skip it
 						continue;
 
-					if (k == minimalpossibilities - 1) // Jest to ostatnia możliwość, dlatego tą sobie do aktualnie rozważanej tablicy wpisujemy
+					if (k == minimalpossibilities - 1) // This is the last possibility for this cell 
 					{
-						// Wpisanie do tablicy cyfry
+						// Store a digit in the board
 						board[minimalpossibilities_ind] = l + '0' + 1;
 
-						// Aktualizacja masek
+						// Update of masks
 						locmasks[GetRow(minimalpossibilities_ind)] |= (1 << l);
 						locmasks[GetCol(minimalpossibilities_ind) + 9] |= (1 << l);
 						locmasks[GetBox(minimalpossibilities_ind) + 18] |= (1 << l);
 
-						if (!isEmptyStack(&numStack)) // Jeżeli jest taka potrzeba to wrzucamy na stos, aby móc się potem wrócić
+						if (!isEmptyStack(&numStack)) // If necessary, we push it on the stack so that we can come back later
 						{
 							push(&numStack, l + 1);
 							push(&indStack, minimalpossibilities_ind);
@@ -234,12 +234,12 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 
 					while (j != i && status != 5)
 					{
-						if (getBit(controlArray, j) == 0) // Znaleziono pustą tablicę
+						if (getBit(controlArray, j) == 0) // Free board found
 							break;
 						j = (j + 1) % RECURSION_TREE_SIZE;
 					}
 
-					if (j != i && status != 5) // Znaleziono pustą tablice w pamięci
+					if (j != i && status != 5) // Free board found
 					{
 						board[minimalpossibilities_ind] = l + '0' + 1;
 						memcpy(boards + j * blockDim.x * gridDim.x * BOARD_SIZE + (blockDim.x * blockIdx.x + threadIdx.x) * BOARD_SIZE, board, sizeof(char) * BOARD_SIZE);
@@ -254,10 +254,10 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 						setBit(controlArray, j);
 					}
 
-					if (j == i && status != 5) // Nieznaleziono pustych tablica w pamięci
+					if (j == i && status != 5) // Free board not found, so we have to push the current board to the stack
 						status = 5;
 
-					if (status == 5) // Nie ma pustych tablic więc musimy wrzucić na stos
+					if (status == 5)
 					{
 						push(&numStack, l + 1);
 						push(&indStack, minimalpossibilities_ind);
@@ -271,11 +271,11 @@ __global__ void solve(char* boards, uint16_t* masks, const unsigned int size)
 }
 
 /**
- * Funkcja rozgrzewająca GPU (nie robi nic ciekawego).
+ * Warming up function for GPU.
  *
- * @param i - parametr ten nie ma znaczenia.
+ * @param i - doesn't have any meaning.
  */
-__global__ void rozgrzewka(int i)
+__global__ void warmup(int i)
 {
 	int res = threadIdx.x * i;
 }
@@ -289,14 +289,14 @@ int main(int argc, char** argv)
 		inputfile = fopen(argv[1], "r");
 	if (inputfile == NULL)
 	{
-		fprintf(stderr, "Nie mozna otworzyc pliku z danymi\n");
+		fprintf(stderr, "Cannot open file with input data.\n");
 		return 1;
 	}
 
 	FILE* cpu_outputfile = fopen(CPU_OUTPUTFILE_PATH, "w");
 	if (cpu_outputfile == NULL)
 	{
-		fprintf(stderr, "Nie mozna otworzyc pliku do zapisu wynikow z cpu\n");
+		fprintf(stderr, "Cannot open file for saving the CPU results.\n");
 		fclose(inputfile);
 		return 1;
 	}
@@ -304,19 +304,19 @@ int main(int argc, char** argv)
 	FILE* gpu_outputfile = fopen(GPU_OUTPUTFILE_PATH, "w");
 	if (gpu_outputfile == NULL)
 	{
-		fprintf(stderr, "Nie mozna otworzyc pliku do zapisu wynikow z gpu\n");
+		fprintf(stderr, "Cannot open file for saving the GPU results.\n");
 		fclose(inputfile);
 		fclose(cpu_outputfile);
 		return 1;
 	}
 
-	char boards[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE]; // Tablica na plansze sudoku wczytane z pliku o wielkości maksymalnej gla GPU
-	char cpu_solutions[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE]; // Tablica rozwiązania CPU
+	char boards[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE]; // Table for sudoku boards read from input file of max capacity for the GPU
+	char cpu_solutions[THREADS_IN_BLOCK * MAX_BLOCKS * BOARD_SIZE]; // Table for the solutions of sudoku solved by CPU
 	long long cpu_time = 0, gpu_time = 0, gpu_alg_time = 0, gpu_copy_to_d_time = 0, gpu_copy_to_h_time = 0, gpu_alloc_time = 0, check_and_save_time = 0;
 	int done = 0, boards_count = 0, cpu_correct_boards = 0, gpu_correct_boards = 0;
-	char line[83]; // Tablica na linie wczytaną z pliku
+	char line[83]; // Table for the line read from input file
 
-	// Zmienne Cuda
+	// CUDA variables
 	cudaError_t cudaStatus;
 	char* d_boards;
 	uint16_t* d_masks;
@@ -329,7 +329,7 @@ int main(int argc, char** argv)
 		goto Error;
 	}
 
-	// Alokujemy pamięć na tablice w GPU
+	// Allocating memory for boards in GPU
 	cudaStatus = cudaMalloc(&d_boards, sizeof(char) * BOARD_SIZE * MAX_BLOCKS * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
 	if (cudaStatus != cudaSuccess)
 	{
@@ -337,7 +337,7 @@ int main(int argc, char** argv)
 		goto Error;
 	}
 
-	// Alokujemy pamięć na maski w GPU
+	// Allocating memory for masks in GPU
 	cudaStatus = cudaMalloc(&d_masks, sizeof(uint16_t) * MASK_ARRAY_SIZE * MAX_BLOCKS * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
 	auto gpu_alloc_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
@@ -347,8 +347,8 @@ int main(int argc, char** argv)
 	}
 	gpu_alloc_time = 0.001 * duration_cast<microseconds> (gpu_alloc_te - gpu_alloc_ts).count();
 
-	// Część rozgrzewająca GPU
-	rozgrzewka <<<1, 512 >>> (2);
+	// Warmup function for GPU
+	warmup <<<1, 512 >>> (2);
 	cudaStatus = cudaDeviceSynchronize();
 	if (cudaStatus != cudaSuccess)
 	{
@@ -360,7 +360,7 @@ int main(int argc, char** argv)
 	{
 		memcpy(boards + boards_count * BOARD_SIZE, line, sizeof(char) * 81);
 
-		// Sprawdzamy, czy sudoku jest poprawnie zapisane, oraz czy ma conajmniej 17 liczb innych od 0
+		// Checking if the sudoku is valid and has at least 17 non-zero numbers
 		if (!validateSudoku(&boards[boards_count * BOARD_SIZE]))
 		{
 			char zeroBoard[BOARD_SIZE] = { 0 };
@@ -371,9 +371,9 @@ int main(int argc, char** argv)
 
 		boards_count++;
 
-		if (boards_count == (THREADS_IN_BLOCK * MAX_BLOCKS)) // Zapełniony cały batch
+		if (boards_count == (THREADS_IN_BLOCK * MAX_BLOCKS)) // The batch is full
 		{
-			// Rozwiązanie CPU
+			// Solving with CPU
 			auto cpu_ts = high_resolution_clock::now();
 			for (int i = 0; i < boards_count; i++)
 			{
@@ -382,7 +382,7 @@ int main(int argc, char** argv)
 			auto cpu_te = high_resolution_clock::now();
 			cpu_time += 0.001 * duration_cast<microseconds> (cpu_te - cpu_ts).count();
 
-			// Sprawdzanie rozwiązań CPU i zapisanie w pliku
+			// Checking CPU solutions and saving to file
 			auto cpu_check_and_save_ts_1 = high_resolution_clock::now();
 			for (int i = 0; i < boards_count; i++)
 			{
@@ -394,7 +394,7 @@ int main(int argc, char** argv)
 			auto cpu_check_and_save_te_1 = high_resolution_clock::now();
 			check_and_save_time += 0.001 * duration_cast<microseconds> (cpu_check_and_save_te_1 - cpu_check_and_save_ts_1).count();
 
-			// Rozwiązanie GPU
+			// Solving with GPU
 			auto gpu_ts = high_resolution_clock::now();
 			cudaStatus = solvewithGPU(boards, boards_count,d_boards, d_masks, &gpu_copy_to_d_time, &gpu_alg_time, &gpu_copy_to_h_time);
 			auto gpu_te = high_resolution_clock::now();
@@ -405,7 +405,7 @@ int main(int argc, char** argv)
 			}
 			gpu_time += 0.001 * duration_cast<microseconds> (gpu_te - gpu_ts).count();
 
-			// Sprawdzanie rozwiązań GPU i zapisanie w pliku
+			// Checking GPU solutions and saving to file
 			auto gpu_check_and_save_ts_1 = high_resolution_clock::now();
 			for (int i = 0; i < boards_count; i++)
 			{
@@ -418,15 +418,15 @@ int main(int argc, char** argv)
 			check_and_save_time += 0.001 * duration_cast<microseconds> (gpu_check_and_save_te_1 - gpu_check_and_save_ts_1).count();
 
 			done += boards_count;
-			printf("Zrobilismy: %d\n", done);
+			printf("Solved: %d\n", done);
 			boards_count = 0;
 		}
 	}
 
-	// Plik się skończył, a batch nie został zapełniony więc dla wczytanych i nie rozwiązanych już plansz wywołujemy algorytmy
+	// File ended, but the batch is not full, so we solve the already read and not solved boards
 	if (boards_count != 0)
 	{
-		// Rozwiązanie CPU
+		// Solving with CPU
 		auto cpu_ts = high_resolution_clock::now();
 		for (int i = 0; i < boards_count; i++)
 		{
@@ -435,7 +435,7 @@ int main(int argc, char** argv)
 		auto cpu_te = high_resolution_clock::now();
 		cpu_time += 0.001 * duration_cast<microseconds> (cpu_te - cpu_ts).count();
 
-		// Sprawdzanie rozwiązań CPU i zapisanie w pliku
+		// Checking CPU solutions and saving to file
 		auto cpu_check_and_save_ts_2 = high_resolution_clock::now();
 		for (int i = 0; i < boards_count; i++)
 		{
@@ -447,7 +447,7 @@ int main(int argc, char** argv)
 		auto cpu_check_and_save_te_2 = high_resolution_clock::now();
 		check_and_save_time += 0.001 * duration_cast<microseconds> (cpu_check_and_save_te_2 - cpu_check_and_save_ts_2).count();
 
-		// Rozwiązanie GPU
+		// Solving with GPU
 		auto gpu_ts = high_resolution_clock::now();
 		cudaStatus = solvewithGPU(boards, boards_count, d_boards, d_masks, &gpu_copy_to_d_time, &gpu_alg_time, &gpu_copy_to_h_time);
 		auto gpu_te = high_resolution_clock::now();
@@ -458,7 +458,7 @@ int main(int argc, char** argv)
 		}
 		gpu_time += 0.001 * duration_cast<microseconds> (gpu_te - gpu_ts).count();
 
-		// Sprawdzanie rozwiązań GPU i zapisanie w pliku
+		// Checking GPU solutions and saving to file
 		auto gpu_check_and_save_ts_2 = high_resolution_clock::now();
 		for (int i = 0; i < boards_count; i++)
 		{
@@ -471,7 +471,7 @@ int main(int argc, char** argv)
 		check_and_save_time += 0.001 * duration_cast<microseconds> (gpu_check_and_save_te_2 - gpu_check_and_save_ts_2).count();
 
 		done += boards_count;
-		printf("Zrobilismy: %d\n", done);
+		printf("Solved: %d\n", done);
 	}
 
 	fputc('\0', cpu_outputfile);
@@ -504,29 +504,29 @@ Error:
 }
 
 /**
- * Funckja pomocnicza, agregująca główne wywołania w programie CUDA ( zapis danych do GPU, algorytm, odczyt wyników z GPU)
+ * Helper function aggregating the main CUDA calls (copying data to GPU, algorithm, reading results from GPU).
  *
- * @param[in] h_boards - tablica, w której zapisane są plansze sudoku po stronie hosta
- * @param[in] boards - ilość tablic do rozwiązania
- * @param[in] d_boards - wskaźnik na plansze sudoku w GPU
- * @param[in] d_masks - wskaźnik na tablice masek w GPU
- * @param[out] copy_to_d_time - wskaźnik na zmienną z czasem, w jakim kopiujemy dane z hosta do GPU
- * @param[out] alg_time - wskaźnik na zmienną z czasem, w jakim wykonujemy funckję rozwiązywania sudoku (algorytm)
- * @param[out] copy_to_h_time - wskaźnik na zmienną z czasem, w jakim kopiujemy dane z GPU do hosta
- * @return możliwy error, który zaszedł podczas "CUDA-owych" operacji
+ * @param[in] h_boards - array in which are stored sudoku boards read from input file (host side).
+ * @param[in] boards - number of boards to solve in this kernel call.
+ * @param[in] d_boards - pointer to the array in which the boards are stored in GPU memory.
+ * @param[in] d_masks - pointer to the array in which the masks are stored in GPU memory.
+ * @param[out] copy_to_d_time - pointer to the variable with the time in which we copy data from host to GPU.
+ * @param[out] alg_time - pointer to the variable with the time in which we run the algorithm on GPU.
+ * @param[out] copy_to_h_time - pointer to the variable with the time in which we copy data from GPU to host.
+ * @return error code from CUDA functions, cudaSuccess if everything went well.
  */
 cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, uint16_t* d_masks, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time)
 {
 	cudaError_t cudaStatus;
 
-	// Ustawienie wystarczającej ilości bloków dla podanej w boards ilości plansz
+	// Setting the number of blocks for the kernel function
 	int blocks = 0;
 	if (boards % THREADS_IN_BLOCK != 0)
 		blocks = ((boards - (boards % THREADS_IN_BLOCK)) / THREADS_IN_BLOCK) + 1;
 	else
 		blocks = boards / THREADS_IN_BLOCK;
 
-	// Przekopiowanie plansz do GPU
+	// Copying boards to GPU memory
 	auto gpu_memory_copy_ts = high_resolution_clock::now();
 	cudaStatus = cudaMemcpy(d_boards, h_boards, sizeof(char) * BOARD_SIZE * boards, cudaMemcpyHostToDevice);
 	auto gpu_memory_copy_te = high_resolution_clock::now();
@@ -537,7 +537,7 @@ cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, ui
 	}
 	*copy_to_d_time += duration_cast<microseconds>(gpu_memory_copy_te - gpu_memory_copy_ts).count();
 
-	// Wywołanie algorytmu rozwiązywania sudoku
+	// Calling the kernel function to solve sudoku boards
 	auto gpu_sol_ts = high_resolution_clock::now();
 	solve <<<blocks, THREADS_IN_BLOCK>>> (d_boards, d_masks, boards);
 	cudaStatus = cudaDeviceSynchronize();
@@ -549,7 +549,7 @@ cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, ui
 	}
 	*alg_time += 0.001 * duration_cast<microseconds>(gpu_sol_te - gpu_sol_ts).count();
 
-	// Pobranie do hosta rozwiązanych plansz
+	// Copying solved boards back to host memory
 	auto gpu_memory_back_ts = high_resolution_clock::now();
 	cudaStatus = cudaMemcpy(h_boards, d_boards, sizeof(char) * BOARD_SIZE * boards, cudaMemcpyDeviceToHost);
 	if (cudaStatus != cudaSuccess)
@@ -564,10 +564,10 @@ Error:
 }
 
 /**
- * Zlicza cyfry jakie można wpisać w tą komórkę.
+ * Converts cellmask to the number of possibilities that can be written in the cell with this mask.
  *
- * @param cellmask Suma masek na danej komórce.
- * @return Liczba cyfr jakie mogą być wpisane w komórkę z tą maską.
+ * @param cellmask - mask of the cell, where each bit represents whether a digit from 1 to 9 can be written in the cell (0 - can be written, 1 - cannot be written).
+ * @return Possibilities that can be written in the cell with this mask (0-9).
  */
 __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask)
 {
@@ -583,9 +583,9 @@ __host__ __device__ uint8_t cellmask_to_possibilities(uint16_t cellmask)
 }
 
 /**
- * Wypisuje planszę w konsoli.
+ * Displays the sudoku board in a readable format.
  *
- * @param board - plansza do wypisania.
+ * @param board - pointer to the board to be displayed.
  */
 __host__ void print_board(char* board)
 {
@@ -609,11 +609,11 @@ __host__ void print_board(char* board)
 }
 
 /**
- * Sprawdza plansze pobraną z pliku w prostu sposób, czy jest możliwa do rozwiązania oraz, czy ma jedno rozwiązanie.
+ * Checks if the sudoku board is valid (1 solution and no contradictions).
  *
- * @param board - plansza do sprawdzenia.
+ * @param board - pointer to the board to be checked.
  * 
- * @returns Poprawność planszy
+ * @returns Validation result: true if the board is valid and has at least 17 non-zero numbers, false otherwise.
  */
 __host__ bool validateSudoku(char* board)
 {
@@ -639,11 +639,11 @@ __host__ bool validateSudoku(char* board)
 }
 
 /**
- * Sprawdza rozwiązaną plansze sudoku.
+ * Checks solved sudoku board for correctness.
  *
- * @param board - wskaźnik na plansze do sprawdzenia
+ * @param board - pointer to the board to be checked.
  *
- * @returns poprawność planszy
+ * @returns correctness of the board: true if the board is correct, false otherwise.
  */
 __host__ bool sudokuCheck(char* board)
 {
@@ -666,10 +666,10 @@ __host__ bool sudokuCheck(char* board)
 }
 
 /**
- * Liczy, w którym rzędzie znajduje się komórka o danym indeksie.
+ * Converts the index of a cell in the sudoku board to the row number.
  *
- * @param ind - indeks komórki
- * @return numer rzędu, w którym jest komórka (liczony od 0)
+ * @param ind - index of the cell.
+ * @return row number where the cell is located (counted from 0).
  */
 __host__ __device__ uint8_t GetRow(uint8_t ind)
 {
@@ -677,10 +677,10 @@ __host__ __device__ uint8_t GetRow(uint8_t ind)
 }
 
 /**
- * Liczy, w której kolumnie znajduje się komórka o danym indeksie.
+ * Converts the index of a cell in the sudoku board to the column number.
  *
- * @param ind - indeks komórki
- * @return numer kolumny, w której jest komórka (liczona od 0)
+ * @param ind - index of the cell.
+ * @return column number where the cell is located (counted from 0).
  */
 __host__ __device__ uint8_t GetCol(uint8_t ind)
 {
@@ -688,10 +688,10 @@ __host__ __device__ uint8_t GetCol(uint8_t ind)
 }
 
 /**
- * Liczy, w którym box-ie znajduje się komórka o danym indeksie.
+ * Converts the index of a cell in the sudoku board to the box number.
  *
- * @param ind - indeks komórki
- * @return numer box-u, w którym jest komórka (liczony od 0 do 8, od lewego górnego rogu w prawo)
+ * @param ind - index of the cell.
+ * @return number of the box where the cell is located (counted from 0, left upper corner).
  */
 __host__ __device__ uint8_t GetBox(uint8_t ind)
 {
@@ -703,9 +703,9 @@ __host__ __device__ uint8_t GetBox(uint8_t ind)
 }
 
 /**
- * Inicjalizuje stos.
+ * Initializes the stack by setting the top index to -1, indicating that the stack is empty.
  *
- * @param stack - wskaźnik na stos do zainicjalizowania
+ * @param stack - pointer to the stack to be initialized.
  */
 __device__ void initializeStack(Stack* stack)
 {
@@ -713,17 +713,17 @@ __device__ void initializeStack(Stack* stack)
 }
 
 /**
- * Wkłada na górę stosu przekazany element.
+ * Pushes a value onto the top of the stack.
  *
- * @param stack - wskaźnik na stos
- * @param value - wartość, którą wrzucamy na stos
- * @return informacja o powodzeniu akcji, zwraca nie, gdy stos pełny
+ * @param stack - pointer to the stack.
+ * @param value - value to be pushed onto the stack (0-255).
+ * @return information about the success of the action, returns false if the stack is full.
  */
 __device__ bool push(Stack* stack, uint8_t value)
 {
 	if (isFullStack(stack))
 	{
-		printf("Błąd: Stos jest pełny!\n");
+		printf("Error: Stack if full!\n");
 		return false;
 	}
 	stack->data[++stack->top] = value;
@@ -731,17 +731,17 @@ __device__ bool push(Stack* stack, uint8_t value)
 }
 
 /**
- * Zdejmuje z góry stosu element.
+ * Pops a value from the top of the stack.
  *
- * @param[in] stack - wskaźnik na stos
- * @param[out] value -  wskaźnik na wartość, którą zdejmujemy ze stosu
- * @return informacja o powodzeniu akcji, zwraca nie, gdy stos pusty
+ * @param[in] stack - pointer to the stack.
+ * @param[out] value -  pointer to the value that is popped from the stack.
+ * @return information about the success of the action, returns false if the stack is empty.
  */
 __device__ bool pop(Stack* stack, uint8_t* value)
 {
 	if (isEmptyStack(stack))
 	{
-		printf("Błąd: Stos jest pusty!\n");
+		printf("Error: Stack is empty!\n");
 		return false;
 	}
 	*value = stack->data[stack->top--];
@@ -749,17 +749,17 @@ __device__ bool pop(Stack* stack, uint8_t* value)
 }
 
 /**
- * Podgląda z góry stosu element.
+ * Peeks at the value on the top of the stack without removing it.
  *
- * @param[in] stack - wskaźnik na stos
- * @param[out] value -  wskaźnik na wartość, którą podglądamy na stosie
- * @return informacja o powodzeniu akcji, zwraca nie, gdy stos pusty
+ * @param[in] stack - pointer to the stack.
+ * @param[out] value -  pointer to the value that is on the top of the stack.
+ * @return information about the success of the action, returns false if the stack is empty.
  */
 __device__ bool top(Stack* stack, uint8_t* value)
 {
 	if (isEmptyStack(stack))
 	{
-		printf("Błąd: Stos jest pusty!\n");
+		printf("Error: Stack is empty!\n");
 		return false;
 	}
 	*value = stack->data[stack->top];
@@ -767,10 +767,10 @@ __device__ bool top(Stack* stack, uint8_t* value)
 }
 
 /**
- * Sprawdza, czy stos jest pusty.
+ * Checks if the stack is empty.
  *
- * @param stack - wskaźnik na stos
- * @return informacja o "pustości"
+ * @param stack - poiter to the stack.
+ * @return information about the emptiness of the stack, returns true if the stack is empty, false otherwise.
  */
 __device__ bool isEmptyStack(Stack* stack)
 {
@@ -778,10 +778,10 @@ __device__ bool isEmptyStack(Stack* stack)
 }
 
 /**
- * Sprawdza, czy stos jest pełny.
+ * Checks if the stack is full.
  *
- * @param stack - wskaźnik na stos
- * @return informacja o zapełnieniu stosu
+ * @param stack - pointer to the stack.
+ * @return information about the fullness of the stack, returns true if the stack is full, false otherwise.
  */
 __device__ bool isFullStack(Stack* stack)
 {
@@ -789,45 +789,45 @@ __device__ bool isFullStack(Stack* stack)
 }
 
 /**
- * Funkcja ustawiająca bit o indeksie podanym na 1.
+ * Sets a bit at the index specified to 1.
  *
- * @param controlArray - wskaźnik do tablicy, w której zmieniamy wartość bitów
- * @param index - index zmienianego bita w tablicy
+ * @param controlArray - pointer to the array in which we change the value of bit.
+ * @param index - index of the bit in the array to be set to 1.
  */
 __device__ void setBit(uint8_t* controlArray, uint8_t index)
 {
 	if (index < 0 || index >= RECURSION_TREE_SIZE)
-		printf("Zły index!\n");
+		printf("Wrong index!\n");
 	else
 		controlArray[index / 8] |= (1 << (index % 8));
 }
 
 /**
- * Funkcja ustawiająca bit o indeksie podanym na 0.
+ * Clears a bit at the index specified, setting it to 0.
  *
- * @param controlArray - wskaźnik do tablicy, w której zmieniamy wartość bitów
- * @param index - index zmienianego bita w tablicy
+ * @param controlArray - pointer to the array in which we change the value of bit.
+ * @param index - index of the bit in the array to be cleared (set to 0).
  */
 __device__ void clearBit(uint8_t* controlArray, uint8_t index)
 {
 	if (index < 0 || index >= RECURSION_TREE_SIZE)
-		printf("Zły index!\n");
+		printf("Wrong index!\n");
 	else
 		controlArray[index / 8] &= ~(1 << (index % 8));
 }
 
 /**
- * Funkcja pobierająca wartość bita na pozycji podanej przez index.
+ * Gets a bit value at the specified index in the array.
  *
- * @param controlArray - wskaźnik do tablicy, z której czytamy wartość bitów
- * @param index - index czytanego bita w tablicy
+ * @param controlArray - pointer to the array from which we read the bit value.
+ * @param index - index of the bit in the array to be read (0-RECURSION_TREE_SIZE-1).
  *
- * @returns Wartości bita, czyli 1 lub 0, albo 3, gdy został podany zły indeks i wystąpił błąd
+ * @returns Bit value at the specified index: 0 if the bit is not set, 1 if the bit is set, or 3 if the index is out of bounds.
  */
 __device__ uint8_t getBit(uint8_t* controlArray, uint8_t index) {
 	if (index < 0 || index >= RECURSION_TREE_SIZE)
 	{
-		printf("Zły index!\n");
+		printf("Wrong index!\n");
 		return 3;
 	}
 	return (controlArray[index / 8] & (1 << (index % 8))) != 0;
