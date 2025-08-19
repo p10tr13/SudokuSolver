@@ -37,7 +37,7 @@ using namespace std::chrono;
 
 #define STACK_SIZE 100 // The size of stack for a thread, that doesn't have a free space for a new board in its GPU memory
 
-#define INPUTFILE_PATH "sudoku.csv" // Path to the input file with sudoku boards
+#define INPUTFILE_PATH "sudoku-sm.csv" // Path to the input file with sudoku boards
 
 #define CPU_OUTPUTFILE_PATH "cpu_output.txt" // Path to the file for saving results from CPU
 
