@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpu-solver:
+    name: CPU reference solver tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: g++ -std=c++17 -O2 -Wall -Wextra -Werror -o cpu_solver_test tests/cpu_solver_test.cpp sudoku_cpu.cpp
+      - name: Run on all bundled boards
+        run: ./cpu_solver_test sudoku-sm.csv 1000000
+
+  cuda-build:
+    name: CUDA build (no GPU on the runner, compile only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the CUDA compiler
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-nvcc-12-6 cuda-cudart-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: nvcc -std=c++17 -O2 -arch=sm_61 -o sudoku_solver kernel.cu sudoku_cpu.cpp

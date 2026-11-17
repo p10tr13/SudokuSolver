@@ -1,5 +1,7 @@
 # CUDA Sudoku Solver
 
+[![CI](https://github.com/p10tr13/SudokuSolver/actions/workflows/ci.yml/badge.svg)](https://github.com/p10tr13/SudokuSolver/actions/workflows/ci.yml)
+
 This project implements a **Sudoku solver in CUDA**, leveraging parallel threads to solve multiple Sudoku boards simultaneously.
 
 Each thread is responsible for solving one Sudoku board using a combination of **minimum-possibility heuristics** and **recursive backtracking**.
@@ -8,7 +10,7 @@ Each thread is responsible for solving one Sudoku board using a combination of *
 
 This project was created as part of the academic course **Graphic Processors in Computational Applications** during the **2024/2025 winter semester** at **Warsaw University of Technology**.
 
-The **CPU version** of the Sudoku solver was implemented by the lecturer and is used as a reference to compare both the **solving time** and the **correctness** of the GPU implementation.
+The program also solves every board with a sequential **CPU reference solver** (`sudoku_cpu.cpp`: backtracking that always branches on the cell with the fewest candidates, using bit masks), and compares the solving time and the number of correctly solved boards of both versions.
 
 
 ## 🚀 Features
@@ -66,7 +68,7 @@ Unfortunately all control parameters are currently **hardcoded** in the source f
 * Fully parallelized – each CUDA thread solves a different Sudoku board
 * Mask optimization enables fast possibility checking
 * Hybrid approach: **recursive branching + backtracking** ensures efficiency and memory safety
-* Parameters make it easy to optimize for different GPUs
+* Grid size, branching slots and stack size are compile-time constants that can be tuned for a given GPU
 
 ### ⚠️ Limitations
 
@@ -104,6 +106,31 @@ The program performs best on **large batches of relatively easy Sudoku boards**,
 
 * NVIDIA GPU with CUDA support
 * [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
+* C++17 compiler
+
+## 🔨 Building and running
+
+With `nvcc` (Linux or Windows), setting `-arch` to your GPU (for example `sm_61` for a GTX 10xx, `sm_86` for an RTX 30xx):
+
+```bash
+nvcc -std=c++17 -O2 -arch=sm_61 -o sudoku_solver kernel.cu sudoku_cpu.cpp
+./sudoku_solver [boards.csv]
+```
+
+On Windows you can also open `SudokuSolver.sln` in Visual Studio with the CUDA Toolkit integration.
+
+The program reads the boards from the file given as the first argument, or from `sudoku-sm.csv` by default (250,000 boards, one per line, `0` for an empty cell), writes the solutions to `cpu_output.txt` and `gpu_output.txt`, and prints the times and the number of correct solutions for both versions.
+
+## ✅ Tests
+
+The CPU reference solver has its own test, which needs no GPU:
+
+```bash
+g++ -std=c++17 -O2 -o cpu_solver_test tests/cpu_solver_test.cpp sudoku_cpu.cpp
+./cpu_solver_test sudoku-sm.csv 1000000
+```
+
+It solves every bundled board, checks each solution (rows, columns, boxes and the given digits), and checks the error codes for conflicting givens, invalid characters and boards with more than one solution. GitHub Actions runs this test and checks that the CUDA code compiles with CUDA 12.6; the runners have no GPU, so the CUDA program itself is not run there.
 
 ## 📜 License
 
