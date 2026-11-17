@@ -14,10 +14,10 @@
     <CudaCompile Include="kernel.cu" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="sudokuCPU.h" />
+    <ClInclude Include="sudoku_cpu.h" />
   </ItemGroup>
   <ItemGroup>
-    <Library Include="sudokuCPU.lib" />
+    <ClCompile Include="sudoku_cpu.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{86D60832-15BD-4CA3-AC85-2C27D2FDA652}</ProjectGuid>

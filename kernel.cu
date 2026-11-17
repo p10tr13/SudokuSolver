@@ -14,7 +14,7 @@
 #include <iomanip>
 #include <chrono>
 
-#include "sudokuCPU.h"
+#include "sudoku_cpu.h"
 
 using namespace std;
 using namespace std::chrono;
@@ -282,6 +282,9 @@ __global__ void warmup(int i)
 
 int main(int argc, char** argv)
 {
+	// Declared up front: the error handling jumps to the end with goto, and C++ forbids
+	// jumping over initialized declarations (MSVC accepts it, gcc and clang do not).
+	high_resolution_clock::time_point gpu_alloc_te;
 	FILE* inputfile;
 	if (argc < 2)
 		inputfile = fopen(INPUTFILE_PATH, "r");
@@ -339,7 +342,7 @@ int main(int argc, char** argv)
 
 	// Allocating memory for masks in GPU
 	cudaStatus = cudaMalloc(&d_masks, sizeof(uint16_t) * MASK_ARRAY_SIZE * MAX_BLOCKS * THREADS_IN_BLOCK * RECURSION_TREE_SIZE);
-	auto gpu_alloc_te = high_resolution_clock::now();
+	gpu_alloc_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
 	{
 		fprintf(stderr, "cudaMalloc d_masks failes!\n");
@@ -517,6 +520,12 @@ Error:
  */
 cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, uint16_t* d_masks, long long* copy_to_d_time, long long* alg_time, long long* copy_to_h_time)
 {
+	// Declared up front: the error handling jumps to the end with goto, and C++ forbids
+	// jumping over initialized declarations (MSVC accepts it, gcc and clang do not).
+	high_resolution_clock::time_point gpu_sol_ts;
+	high_resolution_clock::time_point gpu_sol_te;
+	high_resolution_clock::time_point gpu_memory_back_ts;
+	high_resolution_clock::time_point gpu_memory_back_te;
 	cudaError_t cudaStatus;
 
 	// Setting the number of blocks for the kernel function
@@ -538,10 +547,10 @@ cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, ui
 	*copy_to_d_time += duration_cast<microseconds>(gpu_memory_copy_te - gpu_memory_copy_ts).count();
 
 	// Calling the kernel function to solve sudoku boards
-	auto gpu_sol_ts = high_resolution_clock::now();
+	gpu_sol_ts = high_resolution_clock::now();
 	solve <<<blocks, THREADS_IN_BLOCK>>> (d_boards, d_masks, boards);
 	cudaStatus = cudaDeviceSynchronize();
-	auto gpu_sol_te = high_resolution_clock::now();
+	gpu_sol_te = high_resolution_clock::now();
 	if (cudaStatus != cudaSuccess)
 	{
 		fprintf(stderr, "cudaDeviceSynchronize failes: %s!\n", cudaGetErrorString(cudaStatus));
@@ -550,14 +559,14 @@ cudaError_t solvewithGPU(char* h_boards, unsigned int boards, char* d_boards, ui
 	*alg_time += 0.001 * duration_cast<microseconds>(gpu_sol_te - gpu_sol_ts).count();
 
 	// Copying solved boards back to host memory
-	auto gpu_memory_back_ts = high_resolution_clock::now();
+	gpu_memory_back_ts = high_resolution_clock::now();
 	cudaStatus = cudaMemcpy(h_boards, d_boards, sizeof(char) * BOARD_SIZE * boards, cudaMemcpyDeviceToHost);
 	if (cudaStatus != cudaSuccess)
 	{
 		fprintf(stderr, "cudaMemcpy failes! %s\n", cudaGetErrorString(cudaStatus));
 		goto Error;
 	}
-	auto gpu_memory_back_te = high_resolution_clock::now();
+	gpu_memory_back_te = high_resolution_clock::now();
 	*copy_to_h_time += duration_cast<microseconds>(gpu_memory_back_te - gpu_memory_back_ts).count();
 Error:
 	return cudaStatus;
